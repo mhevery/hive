@@ -30,6 +30,21 @@ struct GrokSummary {
     created_at: Option<String>,
 }
 
+/// Minimal record for inferring activity from chat_history.jsonl.
+/// We only care about the top-level type and whether an assistant had tool calls
+/// or reasoning (signals of active generation / tool use).
+#[derive(Debug, Deserialize, Default)]
+struct ChatRecord {
+    #[serde(rename = "type")]
+    r#type: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    reasoning: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    // content and other fields are ignored for status inference
+}
+
 /// Parse all Grok sessions found under the given base directory
 /// (normally `~/.grok/sessions`).
 ///
@@ -41,8 +56,14 @@ struct GrokSummary {
 ///
 /// Records are returned sorted by `last_generated_msg` descending (newest first).
 ///
-/// The "currently active" aspect is approximated by a simple recency heuristic
-/// inside `parse_single_session` (last msg within last 10 minutes => Thinking).
+/// The "currently active" aspect (AgentStatus) is derived from the structure of
+/// chat_history.jsonl when available:
+/// - Recent user message with no assistant reply yet, or
+/// - Assistant record with pending/unresolved tool_calls
+///   → Thinking (actively generating or tool-using).
+/// Otherwise (last turn was a completed assistant response) → Waiting.
+/// Falls back to a time-based heuristic only when chat_history.jsonl is absent
+/// or unreadable.
 pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
     let mut records: Vec<AgentRecord> = Vec::new();
 
@@ -134,19 +155,19 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
     let last_generated_msg = parse_grok_timestamp(&ts_str)
         .unwrap_or_else(|_| Utc::now());
 
-    // Simple, deterministic heuristic for "currently active".
-    // If the last message from the agent side is within this window we consider it Thinking.
-    // This is intentionally easy to control from simulated directory fixtures in tests.
-    const THINKING_WINDOW: Duration = Duration::minutes(10);
-    let status = if last_generated_msg > (Utc::now() - THINKING_WINDOW) {
-        AgentStatus::Thinking
-    } else {
-        AgentStatus::Waiting
-    };
-
-    // Future improvement: also tail events.jsonl / updates.jsonl / chat_history.jsonl
-    // and look for the most recent "agent_thought_chunk", open tool_call, phase "waiting_for_model"
-    // vs completed turn, etc. to refine Thinking vs Waiting more precisely.
+    // Prefer structural signals from chat_history.jsonl (pending tool calls,
+    // last speaker being the user or an assistant mid-action).
+    // This matches how real Grok (and Codex) sessions indicate active work.
+    let status = infer_status_from_chat_history(&session_dir.join("chat_history.jsonl"))
+        .unwrap_or_else(|| {
+            // Fallback (kept for sessions without chat_history or for very old tests).
+            const THINKING_WINDOW: Duration = Duration::minutes(10);
+            if last_generated_msg > (Utc::now() - THINKING_WINDOW) {
+                AgentStatus::Thinking
+            } else {
+                AgentStatus::Waiting
+            }
+        });
 
     Ok(AgentRecord::new(
         id,
@@ -177,6 +198,72 @@ fn parse_grok_timestamp(s: &str) -> Result<DateTime<Utc>> {
     anyhow::bail!("unrecognized Grok timestamp format: {}", s)
 }
 
+/// Infer AgentStatus from the structure of chat_history.jsonl (preferred signal).
+///
+/// Based on analysis of real Grok chat histories:
+/// - "user" and "assistant" records form the conversation turns.
+/// - An assistant record with `tool_calls` whose results have not all appeared yet
+///   (i.e. fewer "tool_result" records after it) means the agent is actively tool-using.
+/// - If the most recent speaker (last "user" or "assistant" record) is the user,
+///   the agent is expected to reply → Thinking.
+/// - If the most recent speaker is an assistant with no pending tool activity,
+///   the agent has finished its turn and is waiting for the user → Waiting.
+fn infer_status_from_chat_history(chat_path: &Path) -> Option<AgentStatus> {
+    if !chat_path.exists() {
+        return None;
+    }
+
+    let content = fs::read_to_string(chat_path).ok()?;
+    let mut records: Vec<ChatRecord> = Vec::new();
+    for line in content.lines() {
+        if let Ok(rec) = serde_json::from_str::<ChatRecord>(line) {
+            if rec.r#type.is_some() {
+                records.push(rec);
+            }
+        }
+    }
+    if records.is_empty() {
+        return None;
+    }
+
+    // Find the last "speaker" (user or assistant), ignoring tool_result / system / text etc.
+    // This is the primary signal.
+    let last_speaker = records.iter().rev().find_map(|r| match r.r#type.as_deref() {
+        Some("user") => Some("user"),
+        Some("assistant") => Some("assistant"),
+        _ => None,
+    });
+
+    match last_speaker {
+        Some("user") => {
+            // Recent user prompt with no assistant reply yet → agent should be generating / tool-using.
+            Some(AgentStatus::Thinking)
+        }
+        Some("assistant") => {
+            // Only for assistant do we look for pending tool activity after it.
+            let last_assistant_idx = records.iter().rposition(|r| r.r#type.as_deref() == Some("assistant")).unwrap();
+            let tool_results_after = records[last_assistant_idx + 1..]
+                .iter()
+                .filter(|r| r.r#type.as_deref() == Some("tool_result"))
+                .count();
+
+            let num_tool_calls = records[last_assistant_idx]
+                .tool_calls
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0);
+
+            if num_tool_calls > tool_results_after {
+                // Agent emitted tool calls whose results have not all been observed yet.
+                Some(AgentStatus::Thinking)
+            } else {
+                Some(AgentStatus::Waiting)
+            }
+        }
+        _ => Some(AgentStatus::Waiting),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +274,10 @@ mod tests {
     /// Helper that creates a realistic simulated Grok session tree under `base`.
     /// This is exactly the kind of fixture the user asked for:
     ///   tests can build any directory structure and pass the root to the parser.
+    ///
+    /// `last_speaker` controls the structural AgentStatus inference from chat_history:
+    ///   "user"    → last speaker is user (agent expected to reply) → Thinking
+    ///   "assistant" → last speaker is assistant with no pending tools → Waiting
     fn create_mock_grok_session(
         base: &Path,
         encoded_cwd: &str,
@@ -195,6 +286,7 @@ mod tests {
         session_summary: Option<&str>,
         generated_title: Option<&str>,
         last_active_at: &str,
+        last_speaker: &str,   // "user" or "assistant" (drives structural status)
     ) -> PathBuf {
         let session_dir = base.join(encoded_cwd).join(session_id);
         fs::create_dir_all(&session_dir).expect("create session dir");
@@ -226,12 +318,22 @@ mod tests {
         fs::write(session_dir.join("summary.json"), json).expect("write summary.json");
 
         // Also drop a tiny events.jsonl so future richer status logic has something to read.
-        // For now the processor only looks at summary, but the fixture is realistic.
         let events = format!(
             "{{\"ts\":\"{}\",\"type\":\"turn_started\",\"session_id\":\"{}\"}}\n",
             last_active_at, session_id
         );
         fs::write(session_dir.join("events.jsonl"), events).ok();
+
+        // Write a minimal chat_history.jsonl so the *structural* status inference
+        // (based on last speaker + pending tool calls) can be exercised by tests.
+        let chat = if last_speaker == "user" {
+            // Recent user input with no assistant reply yet → Thinking
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Please continue\"}]}\n".to_string()
+        } else {
+            // Last action was a completed assistant turn (no pending tools) → Waiting
+            "{\"type\":\"assistant\",\"content\":\"Done.\",\"tool_calls\":[]}\n".to_string()
+        };
+        fs::write(session_dir.join("chat_history.jsonl"), chat).ok();
 
         session_dir
     }
@@ -251,6 +353,7 @@ mod tests {
             Some("Initialize Git Repository in Local Directory and explore worktrees"),
             Some("Hive: Main"),
             &recent_ts,
+            "user",   // last speaker = user → structural Thinking
         );
 
         let records = parse_grok_sessions(base).unwrap();
@@ -285,6 +388,7 @@ mod tests {
             Some("Add grok processor and simulated dir tests"),
             None,
             &very_recent,
+            "user",   // last speaker = user → structural Thinking
         );
 
         create_mock_grok_session(
@@ -295,6 +399,7 @@ mod tests {
             Some("Refactor the legacy module"),
             None,
             &old,
+            "assistant", // last speaker = assistant, no pending tools → Waiting
         );
 
         let records = parse_grok_sessions(base).unwrap();
@@ -324,6 +429,7 @@ mod tests {
             None,
             Some("Important work happening here"),
             "2026-06-01T10:00:00Z",
+            "assistant",
         );
 
         // A directory that looks like a session but has no summary.json (should be ignored)
@@ -347,7 +453,7 @@ mod tests {
 
         // Also a good one so we can prove we still parse the valid ones
         let good_ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "enc", "good", "/good", Some("Good summary"), None, &good_ts);
+        create_mock_grok_session(base, "enc", "good", "/good", Some("Good summary"), None, &good_ts, "assistant");
 
         let records = parse_grok_sessions(base).unwrap();
         // Only the good one made it through
@@ -367,9 +473,9 @@ mod tests {
         let base = tmp.path();
 
         let ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "e1", "s1", "/project/a", Some("In a"), None, &ts);
-        create_mock_grok_session(base, "e2", "s2", "/project/b/sub", Some("In b/sub"), None, &ts);
-        create_mock_grok_session(base, "e3", "s3", "/completely/other", Some("Other"), None, &ts);
+        create_mock_grok_session(base, "e1", "s1", "/project/a", Some("In a"), None, &ts, "assistant");
+        create_mock_grok_session(base, "e2", "s2", "/project/b/sub", Some("In b/sub"), None, &ts, "assistant");
+        create_mock_grok_session(base, "e3", "s3", "/completely/other", Some("Other"), None, &ts, "assistant");
 
         let filtered = parse_grok_sessions_for_cwd(base, Path::new("/project")).unwrap();
         assert_eq!(filtered.len(), 2); // a and b/sub match starts_with
