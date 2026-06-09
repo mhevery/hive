@@ -1,5 +1,10 @@
 use anyhow::Result;
-use crossterm::terminal;
+use chrono::{DateTime, Utc};
+use crossterm::{
+    execute,
+    style::{Attribute, Color as CrosstermColor, Print, style, ResetColor, Stylize},
+    terminal,
+};
 
 use ratatui::{
     buffer::Buffer,
@@ -10,6 +15,38 @@ use ratatui::{
 };
 
 use crate::agent_record::{AgentRecord, AgentStatus};
+
+/// Format a timestamp as a relative "time ago" string (e.g. "5 min ago", "2 hours ago").
+fn format_last_active(dt: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let dur = now.signed_duration_since(dt);
+    let secs = dur.num_seconds().abs();
+
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        let mins = dur.num_minutes().abs();
+        if mins == 1 {
+            "1 min ago".to_string()
+        } else {
+            format!("{} min ago", mins)
+        }
+    } else if secs < 86400 {
+        let hours = dur.num_hours().abs();
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", hours)
+        }
+    } else {
+        let days = dur.num_days().abs();
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", days)
+        }
+    }
+}
 
 /// Render the list of sessions using a ratatui Table widget for clean column alignment.
 /// The widget is rendered into an offscreen Buffer and then printed row-by-row.
@@ -23,45 +60,32 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
         .map(|r| {
             let status_style = match r.status {
                 AgentStatus::Thinking => Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
                 AgentStatus::Waiting => Style::default().fg(Color::DarkGray),
             };
-            let status_cell = Cell::from(format!("[{}]", r.status)).style(status_style);
-
-            // Show a short prefix of the ID for table density. The full ID remains
-            // available via other commands / future detail views.
-            let short_id = if r.id.len() > 12 {
-                format!("{}…", &r.id[..12])
-            } else {
-                r.id.clone()
-            };
+            let status_cell = Cell::from(r.status.to_string()).style(status_style);
 
             Row::new(vec![
                 status_cell,
-                Cell::from(short_id),
+                Cell::from(r.id.clone()),
                 Cell::from(r.summary.clone()),
-                Cell::from(
-                    r.last_generated_msg
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string(),
-                ),
+                Cell::from(format_last_active(r.last_generated_msg)),
                 Cell::from(r.working_dir.display().to_string()),
             ])
         })
         .collect();
 
-    let header = Row::new(vec!["Status", "ID", "Summary", "Last", "Working Dir"])
+    let header = Row::new(vec!["Status", "ID", "Summary", "Last Active", "Working Dir"])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
-    // Tuned for typical terminal widths (100-160 cols). Status and short-ID are fixed;
-    // timestamp is now shorter; summary + dir get the flexible space.
+    // Tuned for typical terminal widths. Full 36-char IDs require more space.
     let widths = [
-        Constraint::Length(11), // [Thinking]
-        Constraint::Length(13), // short ID
+        Constraint::Length(9),  // Thinking / Waiting
+        Constraint::Length(37), // full session ID (36 chars)
         Constraint::Min(22),
-        Constraint::Length(16), // "YYYY-MM-DD HH:MM"
+        Constraint::Min(13),    // relative time e.g. "3 hours ago"
         Constraint::Min(18),
     ];
 
@@ -76,9 +100,9 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
 
     // Render the widget into a buffer (no terminal backend / cursor control needed).
     // Use current terminal width when possible, but ensure a comfortable minimum so
-    // columns (especially the session ID) don't get crushed on smaller terminals.
+    // the full 36-char session IDs + other columns don't get crushed on smaller terminals.
     let (term_width, _) = terminal::size().unwrap_or((120, 40));
-    let width = term_width.max(110);
+    let width = term_width.max(140);
 
     // Height: 1 (top border) + 1 (header) + 1 (header bottom margin) + N (rows) + 1 (bottom border)
     // Add a couple extra to be safe; the printing loop trims empty trailing lines.
@@ -93,19 +117,42 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
     let mut buf = Buffer::empty(area);
     table.render(area, &mut buf);
 
-    // Print each row from the buffer. This gives us the nice aligned table
-    // as plain(ish) text that remains in scrollback after the process exits.
+    // Print each row from the buffer, using crossterm's StyledContent so that
+    // each cell carries its own foreground color + modifiers (bold).
+    // We do this instead of a full Terminal backend so the table remains
+    // in the user's terminal scrollback after the command exits.
     for y in area.y..(area.y + area.height) {
-        let mut line = String::new();
         for x in area.x..(area.x + area.width) {
             let cell = buf.get(x, y);
-            line.push_str(cell.symbol());
+            let symbol = cell.symbol().to_string();
+
+            let mut styled = style(symbol);
+
+            if let Some(ct_color) = to_crossterm_color(cell.fg) {
+                styled = styled.with(ct_color);
+            }
+
+            if cell.modifier.contains(Modifier::BOLD) {
+                styled = styled.attribute(Attribute::Bold);
+            }
+
+            execute!(std::io::stdout(), Print(styled)).ok();
         }
-        let trimmed = line.trim_end();
-        if !trimmed.is_empty() {
-            println!("{}", trimmed);
-        }
+
+        // Make sure styles are reset after each row (for borders / next content)
+        execute!(std::io::stdout(), ResetColor).ok();
+        println!();
     }
 
     Ok(())
+}
+
+fn to_crossterm_color(color: Color) -> Option<CrosstermColor> {
+    match color {
+        Color::Green => Some(CrosstermColor::Green),
+        Color::DarkGray => Some(CrosstermColor::DarkGrey),
+        Color::Yellow => Some(CrosstermColor::Yellow),
+        Color::Reset => None,
+        _ => None,
+    }
 }
