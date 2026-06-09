@@ -1,20 +1,16 @@
 use clap::Parser;
 
 /// Hive - Multi-Agent Manager
+///
+/// A tool to discover, monitor, and manage AI coding agents (Grok Build, Codex, Claude, Aider, etc.)
+/// across your projects by reading their local session and transcript data.
 #[derive(Parser, Debug)]
-#[command(name = "hive", version, about = "Hive - Dashboard and manager for AI coding agents", long_about = None)]
-struct Args {
-    /// Optional name to greet
-    #[arg(short, long)]
-    name: Option<String>,
-}
+#[command(name = "hive", version, about, long_about = None)]
+struct Cli {}
 
 fn main() {
-    let args = Args::parse();
+    let _cli = Cli::parse();
     println!("🐝 Hive - Agent Manager");
-    if let Some(name) = args.name {
-        println!("Hello, {}!", name);
-    } else {
-        println!("Run 'hive --help' to get started.");
-    }
+    println!();
+    println!("Run 'hive --help' to see available options.");
 }
