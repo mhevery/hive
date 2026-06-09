@@ -94,6 +94,7 @@ pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
 
 /// Variant that returns only sessions whose working_dir matches (or is under) the given cwd.
 /// Useful for project-scoped queries (e.g. `hive list` while inside a repo).
+#[allow(dead_code)]
 pub fn parse_grok_sessions_for_cwd(base_dir: &Path, cwd: &Path) -> Result<Vec<AgentRecord>> {
     let all = parse_grok_sessions(base_dir)?;
     Ok(all
