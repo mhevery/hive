@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
-    prelude::Widget,
+    prelude::{Frame, Widget},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
 
 use crate::agent_record::{AgentRecord, AgentStatus};
@@ -71,13 +71,13 @@ fn format_working_dir(path: &Path) -> String {
 ///
 /// See: https://docs.rs/ratatui-widgets/latest/ratatui_widgets/table/struct.Table.html
 /// (core Table widget is also available via ratatui::widgets::Table)
-pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
+pub fn group_records<'a>(records: &'a [AgentRecord]) -> Vec<(PathBuf, Vec<&'a AgentRecord>)> {
     if records.is_empty() {
-        return Ok(());
+        return vec![];
     }
 
     // Group sessions by working directory
-    let mut groups: HashMap<PathBuf, Vec<&AgentRecord>> = HashMap::new();
+    let mut groups: HashMap<PathBuf, Vec<&'a AgentRecord>> = HashMap::new();
     for r in records {
         groups.entry(r.working_dir.clone()).or_default().push(r);
     }
@@ -88,18 +88,20 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
     }
 
     // Collect groups and sort them alphabetically by directory (using the displayed ~ form)
-    let mut group_list: Vec<(PathBuf, Vec<&AgentRecord>)> = groups.into_iter().collect();
+    let mut group_list: Vec<(PathBuf, Vec<&'a AgentRecord>)> = groups.into_iter().collect();
     group_list.sort_by(|(a, _), (b, _)| {
         format_working_dir(a).cmp(&format_working_dir(b))
     });
 
-    // Build rows: group header rows + data rows (with blank first column for visual indent)
+    group_list
+}
+
+fn build_table_rows(records: &[AgentRecord]) -> (Vec<Row>, Vec<(usize, String)>) {
+    let group_list = group_records(records);
     let mut rows: Vec<Row> = Vec::new();
-    let mut header_dirs: Vec<(usize, String)> = Vec::new(); // (index in `rows`, formatted dir for spilling)
+    let mut header_dirs: Vec<(usize, String)> = Vec::new();
 
     for (i, (dir, sessions)) in group_list.iter().enumerate() {
-        // Insert a blank row before each directory header (except the first)
-        // to visually separate groups.
         if i > 0 {
             rows.push(Row::new(vec![
                 Cell::from(""),
@@ -110,13 +112,14 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
             ]));
         }
 
-        // Group header row: directory on its own (visually)
         let formatted_dir = format_working_dir(dir);
-        let dir_cell = Cell::from(formatted_dir.clone())
-            .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
 
+        // Use empty cells for the group header row in the Table.
+        // The full directory name will be overlaid (in TUI) or spread (in non-TUI buffer)
+        // across the entire row width for the "spill" visual.
+        // This prevents the clipped dir from appearing in the narrow "Dir" column.
         let group_header = Row::new(vec![
-            dir_cell,
+            Cell::from(""),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -127,7 +130,6 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
         rows.push(group_header);
         header_dirs.push((header_body_idx, formatted_dir));
 
-        // Data rows for this directory (first column left blank for indent)
         for s in sessions {
             let status_style = match s.status {
                 AgentStatus::Thinking => Style::default()
@@ -138,7 +140,7 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
             let status_cell = Cell::from(s.status.to_string()).style(status_style);
 
             let data_row = Row::new(vec![
-                Cell::from("  "), // small indent under the directory header
+                Cell::from("  "),
                 status_cell,
                 Cell::from(s.id.clone()),
                 Cell::from(s.summary.clone()),
@@ -146,6 +148,15 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
             ]);
             rows.push(data_row);
         }
+    }
+
+    (rows, header_dirs)
+}
+
+pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
+    let (rows, header_dirs) = build_table_rows(records);
+    if rows.is_empty() {
+        return Ok(());
     }
 
     let header = Row::new(vec!["Dir", "Status", "ID", "Summary", "Last Active"])
@@ -191,24 +202,15 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
     let mut buf = Buffer::empty(area);
     table.render(area, &mut buf);
 
-    // Discover which rows in the rendered buffer are the group header rows
-    // (they have a path starting with ~ or / in the left content area).
-    // Then spread the corresponding full directory across the row so it
-    // visually spills over the other columns (which are empty on those rows).
-    let mut candidate_ys: Vec<u16> = Vec::new();
-    for y in area.y..(area.y + area.height) {
-        let sx = area.x + 1;
-        if sx < area.x + area.width {
-            let s = buf.get(sx, y).symbol();
-            if s.starts_with('~') || s.starts_with('/') {
-                candidate_ys.push(y);
-            }
-        }
-    }
-
-    for (i, y) in candidate_ys.into_iter().enumerate() {
-        if let Some((_, full_dir)) = header_dirs.get(i) {
-            spread_dir_over_row(&mut buf, y, area, full_dir);
+    // Spread the full directory on the exact group header rows (using the
+    // collected body indices) so it spills across the row. This works even
+    // though we put empty cells in the group_header rows (prevents clipped
+    // dir from the narrow column).
+    let table_header_height: u16 = 3; // table header (1) + bottom_margin (1) + top border offset -> body starts at +3
+    for (body_idx, full_dir) in &header_dirs {
+        let row_y = area.y + table_header_height + *body_idx as u16;
+        if row_y < area.y + area.height {
+            spread_dir_over_row(&mut buf, row_y, area, full_dir);
         }
     }
 
@@ -249,6 +251,77 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
     out.flush().ok();
 
     Ok(())
+}
+
+/// Proper ratatui rendering for --watch mode.
+/// Uses the exact same rows/header/widths/block as the non-watch path for
+/// visual consistency (including the narrow "Dir" column and blank separators).
+/// Then overlays full-width directory text on the group header rows to
+/// replicate the "spill" effect.
+pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentRecord], watch: bool) {
+    let (rows, header_dirs) = build_table_rows(records);
+    if rows.is_empty() {
+        let msg = Paragraph::new("No agent sessions found.");
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let header = Row::new(vec!["Dir", "Status", "ID", "Summary", "Last Active"])
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .bottom_margin(1);
+
+    let widths = [
+        Constraint::Max(5),
+        Constraint::Length(9),
+        Constraint::Length(37),
+        Constraint::Min(22),
+        Constraint::Min(13),
+    ];
+
+    let title = if watch {
+        " Sessions (newest activity first) — Watching (Ctrl-C to exit) "
+    } else {
+        " Sessions (newest activity first) "
+    };
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title),
+        )
+        .column_spacing(1);
+
+    frame.render_widget(table, area);
+
+    // Overlay the full directory names (spill) on the group header rows.
+    // The table's own header row + its .bottom_margin(1) takes 2 rows;
+    // the first body row starts at +3 from the table content top (after top border).
+    // We draw inside the borders (start after left border) so the outer
+    // left/right borders of the table remain on the header rows.
+    let table_header_height: u16 = 3;
+    let inner_x = area.x + 1;
+    let inner_w = area.width.saturating_sub(2);
+    for (body_idx, full_dir) in header_dirs {
+        let row_y = area.y + table_header_height + body_idx as u16;
+        if row_y < area.y + area.height {
+            let text = if full_dir.len() < inner_w as usize {
+                format!("{}{}", full_dir, " ".repeat(inner_w as usize - full_dir.len()))
+            } else {
+                full_dir.clone()
+            };
+            let dir_para = Paragraph::new(text)
+                .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
+            let full_rect = Rect {
+                x: inner_x,
+                y: row_y,
+                width: inner_w,
+                height: 1,
+            };
+            frame.render_widget(dir_para, full_rect);
+        }
+    }
 }
 
 fn to_crossterm_color(color: Color) -> Option<CrosstermColor> {
