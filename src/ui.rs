@@ -1,10 +1,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use crossterm::{
-    execute,
+    queue,
     style::{Attribute, Color as CrosstermColor, Print, style, ResetColor, Stylize},
     terminal,
 };
+use std::io::Write;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -213,8 +214,14 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
 
     // Print each row from the buffer, using crossterm's StyledContent so that
     // each cell carries its own foreground color + modifiers (bold).
-    // We do this instead of a full Terminal backend so the table remains
-    // in the user's terminal scrollback after the command exits.
+    //
+    // We use `queue!` + a single flush at the end instead of `execute!` per cell.
+    // This makes the whole frame much more atomic from the terminal's point of
+    // view, which dramatically reduces flicker during --watch refreshes.
+    //
+    // (We still avoid a full Terminal + alternate screen in normal mode so that
+    // plain `hive list` output stays in the user's scrollback.)
+    let mut out = std::io::stdout();
     for y in area.y..(area.y + area.height) {
         for x in area.x..(area.x + area.width) {
             let cell = buf.get(x, y);
@@ -230,13 +237,16 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
                 styled = styled.attribute(Attribute::Bold);
             }
 
-            execute!(std::io::stdout(), Print(styled)).ok();
+            queue!(out, Print(styled)).ok();
         }
 
         // Make sure styles are reset after each row (for borders / next content)
-        execute!(std::io::stdout(), ResetColor).ok();
-        println!();
+        queue!(out, ResetColor).ok();
+        queue!(out, Print("\n")).ok();
     }
+
+    // One flush at the end = one big atomic update instead of hundreds of tiny ones.
+    out.flush().ok();
 
     Ok(())
 }
