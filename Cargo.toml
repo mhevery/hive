@@ -1,36 +1,16 @@
-[package]
-name = "hive"
+[workspace]
+members = ["crates/hive", "crates/hive-summarizer"]
+resolver = "2"
+default-members = ["crates/hive"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+authors = ["Hive contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/hive"  # placeholder
+description = "Observe and manage multiple AI coding agents by reading their on-disk session data."
 
-[dependencies]
-clap = { version = "4.6", features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
-ratatui = { version = "0.27", features = ["crossterm"] }
-crossterm = "0.28"
-notify = "6"
-candle-core = { version = "0.6", optional = true }
-candle-nn = { version = "0.6", optional = true }
-candle-transformers = { version = "0.6", optional = true }
-hf-hub = { version = "0.3", optional = true }
-tokenizers = { version = "0.19", default-features = false, features = ["onig"], optional = true }
-
-[dev-dependencies]
-tempfile = "3"
-
-[features]
-default = []
-# Enables the local LLM text summarizer (Candle + Falconsai/text_summarization T5 model from HF).
-# Dep graph can require recent rustc (1.86+) due to transitive icu crates from hf-hub/tokenizers.
-# Activate with: cargo test --features summarizer
-# (On first use, ~240MB weights are downloaded via hf-hub to the local HF cache and inference runs on CPU.)
-summarizer = [
-    "dep:candle-core",
-    "dep:candle-nn",
-    "dep:candle-transformers",
-    "dep:hf-hub",
-    "dep:tokenizers",
-]
+# The root is a pure workspace manifest. Individual crates live under crates/.
+# This structure allows us to keep the core `hive` binary lightweight while the
+# heavy summarizer lives in its own independent executable (with its own deps).

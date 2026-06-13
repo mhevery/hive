@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -195,7 +194,18 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
         .or_else(|| path.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let summary_text = summary.unwrap_or_else(|| "Untitled Codex session".to_string());
+    let mut summary_text = summary.unwrap_or_else(|| "Untitled Codex session".to_string());
+
+    // Optional LLM refinement (same as Grok) when HIVE_LLM_SUMMARIES=1 and native
+    // summary is weak. For a fuller transcript we would accumulate more content
+    // from the rollout events while scanning.
+    if std::env::var("HIVE_LLM_SUMMARIES").is_ok() && summary_text.len() < 80 {
+        if let Ok(better) = crate::summarizer_client::summarize_via_external(&summary_text) {
+            if !better.trim().is_empty() {
+                summary_text = better;
+            }
+        }
+    }
 
     // Prefer clean id from session_meta if we saw one; for now we keep filename-based id
     // (the meta id is the same as the uuid in the filename in the example).

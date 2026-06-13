@@ -14,10 +14,8 @@ use std::time::Duration;
 mod agent_record;
 mod codex_processor;
 mod grok_processor;
+mod summarizer_client;
 mod ui;
-
-#[cfg(feature = "summarizer")]
-mod summarizer;
 
 use agent_record::AgentRecord;
 
@@ -40,6 +38,15 @@ enum Commands {
         #[arg(short, long)]
         watch: bool,
     },
+
+    /// Test the local text summarizer (Falconsai/text_summarization T5 model via Candle).
+    /// Provide the text to summarize as one or more arguments (will be joined),
+    /// or pipe text via stdin (e.g. `cat notes.txt | hive summarize`).
+    Summarize {
+        /// The text to summarize. If omitted, reads from stdin.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Option<Vec<String>>,
+    },
 }
 
 fn main() {
@@ -55,6 +62,7 @@ fn main() {
 fn run_command(cmd: Commands) -> Result<()> {
     match cmd {
         Commands::List { watch } => run_list(watch),
+        Commands::Summarize { text } => run_summarize(text),
     }
 }
 
@@ -226,6 +234,66 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
         Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+/// Collect text for summarization: either from the provided CLI args (joined by space)
+/// or, if none given, by reading all of stdin.
+/// This helper is now always available (it has no dependency on the ML crates).
+fn collect_text(text: Option<Vec<String>>) -> Result<String> {
+    if let Some(parts) = text {
+        if !parts.is_empty() {
+            return Ok(parts.join(" "));
+        }
+    }
+    // No args (or empty) — read from stdin. This supports pipelines:
+    //   echo "long text..." | hive summarize
+    //   cat document.txt | hive summarize
+    use std::io::{self, Read};
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf)?;
+    Ok(buf)
+}
+
+/// Always-present command handler. When the "summarizer" feature is not enabled
+/// at build time we emit a clear message telling the user how to activate it.
+fn run_summarize(text: Option<Vec<String>>) -> Result<()> {
+    let input = collect_text(text)?;
+    let input = input.trim();
+    if input.is_empty() {
+        anyhow::bail!(
+            "No text provided to summarize.\n\
+             Pass text as arguments, e.g.:\n  hive summarize \"The quick brown fox...\"\n\
+             Or pipe via stdin, e.g.:\n  cat mydoc.txt | hive summarize"
+        );
+    }
+
+    // Delegate to the separate `hive-summarizer` executable.
+    // This keeps the main `hive` binary free of the heavy Candle / ML dependencies.
+    // The client will locate the binary (via HIVE_SUMMARIZER, next to exe, PATH, etc.)
+    // and stream the text over stdin.
+    match summarizer_client::summarize_via_external(input) {
+        Ok(summary) => {
+            println!("{}", summary);
+            Ok(())
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Failed to run the summarizer component: {}\n\n\
+                 The 'summarize' functionality lives in a separate binary\n\
+                 (`hive-summarizer`) that contains the local LLM (Candle + T5).\n\n\
+                 To build it from this workspace:\n\
+                   cargo build -p hive-summarizer --release\n\n\
+                 Make it discoverable by one of:\n\
+                   - copy the binary next to the `hive` binary\n\
+                   - add its directory to PATH\n\
+                   - export HIVE_SUMMARIZER=/path/to/hive-summarizer\n\n\
+                 Then use:\n\
+                   hive summarize \"your text...\"\n\
+                   cat transcript.txt | hive summarize",
+                e
+            )
+        }
     }
 }
 

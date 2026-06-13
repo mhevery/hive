@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::t5::{Config, T5ForConditionalGeneration};
 use hf_hub::api::sync::Api;
@@ -27,12 +27,25 @@ impl TextSummarizer {
     pub fn new_from_repo(repo_id: &str) -> Result<Self> {
         let device = Device::Cpu;
 
+        // Force a good absolute HF_ENDPOINT to prevent "RelativeUrlWithoutBase" errors.
+        // Some environments/tools set HF_ENDPOINT to a relative or bad value, which
+        // makes hf-hub construct relative URLs internally.
+        let original_hf_endpoint = std::env::var("HF_ENDPOINT").ok();
+        std::env::set_var("HF_ENDPOINT", "https://huggingface.co");
+
         let api = Api::new().context("failed to construct hf-hub Api")?;
+
+        // Debug info
+        eprintln!("HF_ENDPOINT env var: {:?}", std::env::var("HF_ENDPOINT").ok());
+
         let repo = api.model(repo_id.to_string());
+
+        let config_url = format!("https://huggingface.co/{}/resolve/main/config.json", repo_id);
+        eprintln!("Attempting to fetch: {}", config_url);
 
         let config_path = repo
             .get("config.json")
-            .with_context(|| format!("downloading config.json for {}", repo_id))?;
+            .with_context(|| format!("downloading config.json for {} (are you connected to the internet? Is huggingface.co reachable?)", repo_id))?;
         let tokenizer_path = repo
             .get("tokenizer.json")
             .with_context(|| format!("downloading tokenizer.json for {}", repo_id))?;
@@ -57,6 +70,13 @@ impl TextSummarizer {
 
         let model = T5ForConditionalGeneration::load(vb, &config)
             .context("loading T5ForConditionalGeneration weights into model")?;
+
+        // Restore original HF_ENDPOINT if we changed it
+        if let Some(val) = original_hf_endpoint {
+            std::env::set_var("HF_ENDPOINT", val);
+        } else {
+            std::env::remove_var("HF_ENDPOINT");
+        }
 
         Ok(Self {
             model,
@@ -164,12 +184,8 @@ mod tests {
     /// - Download the model weights on first execution (cached afterwards)
     /// - Run a short inference on CPU
     ///
-    /// Run with:
-    ///   cargo test --features summarizer -- --nocapture
-    ///
     /// The first run may take a minute or two depending on bandwidth and CPU.
     #[test]
-    #[cfg(feature = "summarizer")]
     fn falconsai_text_summarization_works() {
         let mut summarizer = TextSummarizer::new()
             .expect("failed to load Falconsai/text_summarization model via Candle");
@@ -196,10 +212,5 @@ across different working directories and projects.";
             input.len(),
             summary
         );
-
-        // Print for visibility when running with --nocapture so the user sees the model in action.
-        println!("\n=== Summarizer demo (Falconsai/text_summarization via Candle) ===");
-        println!("Input ({} chars):\n{}\n", input.len(), input);
-        println!("Summary ({} chars):\n{}\n", summary.len(), summary);
     }
 }

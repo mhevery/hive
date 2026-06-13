@@ -87,6 +87,18 @@ It reads `summary.json` for metadata and `chat_history.jsonl` to determine curre
 
 In watch mode it uses the `notify` crate to react to filesystem changes under the sessions directory and redraws the table in an alternate screen buffer.
 
+## Summarization (optional companion)
+
+A separate binary `hive-summarizer` provides local text summarization (currently using a small T5 model via Candle).
+
+- `hive summarize "long text..."` (or pipe via stdin) will locate and invoke the companion binary.
+- The main `hive` binary has **no** dependency on the ML crates; the heavy work only runs when the summarizer process is spawned.
+- Build the companion with `cargo build -p hive-summarizer --release`.
+- Make it discoverable by placing it next to `hive`, in PATH, or via `HIVE_SUMMARIZER=/path/to/hive-summarizer`.
+- Direct use: `cat transcript.txt | hive-summarizer`
+
+This design lets the core observer tool stay lightweight while still allowing high-quality local LLM summaries of full agent discussions/transcripts (future integration into processors for better `AgentRecord` summaries is planned).
+
 ## Development
 
 ```bash
