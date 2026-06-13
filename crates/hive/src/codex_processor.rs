@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -103,6 +104,8 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
     let mut summary: Option<String> = None;
     let mut last_was_user = false;
     let mut pending_tools = 0i32;
+    let mut active_turns: HashSet<String> = HashSet::new();
+    let mut anonymous_active_turns = 0i32;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -153,6 +156,14 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                                         last_was_user = false;
                                     }
                                     "task_started" => {
+                                        if let Some(turn_id) =
+                                            payload.get("turn_id").and_then(|v| v.as_str())
+                                        {
+                                            active_turns.insert(turn_id.to_string());
+                                        } else {
+                                            anonymous_active_turns += 1;
+                                        }
+
                                         if cwd.is_none() {
                                             if let Some(c) = payload
                                                 .get("cwd")
@@ -167,6 +178,16 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                                             }
                                         }
                                     }
+                                    "task_complete" | "turn_aborted" => {
+                                        if let Some(turn_id) =
+                                            payload.get("turn_id").and_then(|v| v.as_str())
+                                        {
+                                            active_turns.remove(turn_id);
+                                        } else if anonymous_active_turns > 0 {
+                                            anonymous_active_turns -= 1;
+                                        }
+                                        last_was_user = false;
+                                    }
                                     _ => {}
                                 }
                             }
@@ -175,15 +196,21 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                     "response_item" => {
                         if let Some(payload) = val.get("payload") {
                             if let Some(pt) = payload.get("type").and_then(|v| v.as_str()) {
-                                if pt == "function_call" {
+                                if pt == "function_call" || pt == "custom_tool_call" {
                                     pending_tools += 1;
-                                } else if pt == "function_call_output" {
+                                } else if pt == "function_call_output"
+                                    || pt == "custom_tool_call_output"
+                                {
                                     if pending_tools > 0 {
                                         pending_tools -= 1;
                                     }
                                     last_was_user = false;
                                 } else if pt == "message" {
-                                    last_was_user = false;
+                                    match payload.get("role").and_then(|v| v.as_str()) {
+                                        Some("user") => last_was_user = true,
+                                        Some("assistant") => last_was_user = false,
+                                        _ => {}
+                                    }
                                 }
                             }
                         }
@@ -218,7 +245,8 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
     // (the meta id is the same as the uuid in the filename in the example).
     // If we want, we can parse the first session_meta for id, but filename is unique and fine.
 
-    let status = if last_was_user || pending_tools > 0 {
+    let has_active_turn = !active_turns.is_empty() || anonymous_active_turns > 0;
+    let status = if has_active_turn || last_was_user || pending_tools > 0 {
         AgentStatus::Thinking
     } else {
         AgentStatus::Waiting
@@ -252,7 +280,8 @@ mod tests {
 
         // task started with cwd
         content.push_str(&format!(
-            r#"{{"type":"event_msg","payload":{{"type":"task_started","cwd":"{}"}}}}"#,
+            r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-{}","cwd":"{}"}}}}"#,
+            filename,
             cwd
         ));
         content.push('\n');
@@ -279,6 +308,11 @@ mod tests {
             content.push_str(
                 r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Done."}}"#,
             );
+            content.push('\n');
+            content.push_str(&format!(
+                r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-{}"}}}}"#,
+                filename
+            ));
             content.push('\n');
         }
 
@@ -325,6 +359,28 @@ mod tests {
             .any(|r| r.status == AgentStatus::Waiting && r.source == AgentSource::Codex);
         assert!(has_thinking);
         assert!(has_waiting);
+    }
+
+    #[test]
+    fn open_codex_turn_is_thinking_without_pending_tools() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let file = base.join("rollout-running.jsonl");
+        fs::write(
+            &file,
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"running-turn","cwd":"/Users/misko/work/hive"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"type":"event_msg","payload":{"type":"user_message","message":"Investigate status"}}"#
+                + "\n"
+                + r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I am looking now."}]}}"#
+                + "\n",
+        )
+        .expect("write running rollout");
+
+        let records = parse_codex_sessions(base).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, AgentStatus::Thinking);
     }
 
     #[test]
