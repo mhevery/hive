@@ -96,7 +96,12 @@ fn load_records(grok_root: &Option<PathBuf>, directory_filter: Option<&Path>) ->
 
     // Grok
     if let Some(root) = grok_root {
-        match grok_processor::parse_grok_sessions(root) {
+        let result = if let Some(filter) = directory_filter {
+            grok_processor::parse_grok_sessions_for_cwd(root, filter)
+        } else {
+            grok_processor::parse_grok_sessions(root)
+        };
+        match result {
             Ok(mut recs) => records.append(&mut recs),
             Err(e) => {
                 eprintln!(
@@ -115,7 +120,12 @@ fn load_records(grok_root: &Option<PathBuf>, directory_filter: Option<&Path>) ->
         })
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("sessions")));
     if let Some(root) = codex_root {
-        match codex_processor::parse_codex_sessions(&root) {
+        let result = if let Some(filter) = directory_filter {
+            codex_processor::parse_codex_sessions_for_cwd(&root, filter)
+        } else {
+            codex_processor::parse_codex_sessions(&root)
+        };
+        match result {
             Ok(mut recs) => records.append(&mut recs),
             Err(e) => {
                 eprintln!(
@@ -128,12 +138,19 @@ fn load_records(grok_root: &Option<PathBuf>, directory_filter: Option<&Path>) ->
 
     // Sort combined newest first
     records.sort_by(|a, b| b.last_generated_msg.cmp(&a.last_generated_msg));
-    if let Some(filter) = directory_filter {
-        records.retain(|record| is_in_or_under(&record.working_dir, filter));
-    }
+    summarize_records_from_user_text(&mut records);
     records
 }
 
+fn summarize_records_from_user_text(records: &mut [AgentRecord]) {
+    for record in records {
+        if let Some(user_text) = record.user_text.as_deref() {
+            record.summary = summarizer_client::summarize_user_text(user_text, &record.summary);
+        }
+    }
+}
+
+#[cfg(test)]
 fn is_in_or_under(path: &Path, directory: &Path) -> bool {
     let path = normalize_path(path);
     path == directory || path.starts_with(directory)
@@ -398,5 +415,22 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(normalize_path(&records[0].working_dir), child);
+    }
+
+    #[test]
+    fn summarize_records_uses_record_user_text() {
+        std::env::set_var("HIVE_SUMMARIZER", "passthrough");
+
+        let mut records = vec![record_in("/tmp/hive-project").with_user_text(Some(
+            "Refactor the processors to only parse sessions".to_string(),
+        ))];
+
+        summarize_records_from_user_text(&mut records);
+        std::env::remove_var("HIVE_SUMMARIZER");
+
+        assert_eq!(
+            records[0].summary,
+            "[passthrough] Refactor the processors to only parse sessions"
+        );
     }
 }

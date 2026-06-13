@@ -8,6 +8,9 @@ enum SummarizerCommand {
     CargoRun { workspace_root: PathBuf },
 }
 
+const MAX_SUMMARY_INPUT_CHARS: usize = 4000;
+const USER_TEXT_FALLBACK_CHARS: usize = 120;
+
 /// Locate the `hive-summarizer` binary.
 ///
 /// Lookup order (first hit wins):
@@ -34,6 +37,19 @@ fn find_summarizer_command() -> SummarizerCommand {
     // 2. Next to the hive binary itself.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // In local `cargo run` workflows, `hive` is usually debug-built,
+            // but the Candle summarizer is only pleasant to run optimized.
+            if dir.file_name().and_then(|name| name.to_str()) == Some("debug") {
+                if let Some(target_dir) = dir.parent() {
+                    for name in ["hive-summarizer", "hive-summarizer.exe"] {
+                        let candidate = target_dir.join("release").join(name);
+                        if candidate.exists() {
+                            return SummarizerCommand::Binary(candidate);
+                        }
+                    }
+                }
+            }
+
             // Common names
             for name in ["hive-summarizer", "hive-summarizer.exe"] {
                 let candidate = dir.join(name);
@@ -147,6 +163,7 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
                 .arg(workspace_root.join("Cargo.toml"))
                 .arg("-p")
                 .arg("hive-summarizer")
+                .arg("--release")
                 .arg("--")
                 .arg("-");
             c
@@ -202,12 +219,60 @@ pub fn summarize_via_external(text: &str) -> Result<String> {
     run_external_summarizer(text)
 }
 
+pub fn summarize_user_text(text: &str, native_fallback: &str) -> String {
+    let bounded = bounded_summary_input(text);
+    let user_fallback = fallback_from_user_text(&bounded)
+        .unwrap_or_else(|| native_fallback.trim().to_string())
+        .trim()
+        .to_string();
+
+    summarize_via_external(&bounded)
+        .ok()
+        .filter(|summary| is_useful_summary(summary))
+        .unwrap_or(user_fallback)
+}
+
+fn bounded_summary_input(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_SUMMARY_INPUT_CHARS {
+        return trimmed.to_string();
+    }
+
+    let head: String = trimmed.chars().take(MAX_SUMMARY_INPUT_CHARS / 2).collect();
+    let tail_len = MAX_SUMMARY_INPUT_CHARS - head.chars().count();
+    let mut tail_chars: Vec<char> = trimmed.chars().rev().take(tail_len).collect();
+    tail_chars.reverse();
+    let tail: String = tail_chars.into_iter().collect();
+    format!("{head}\n\n{tail}")
+}
+
+fn fallback_from_user_text(text: &str) -> Option<String> {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    let mut out: String = collapsed.chars().take(USER_TEXT_FALLBACK_CHARS).collect();
+    if collapsed.chars().count() > USER_TEXT_FALLBACK_CHARS {
+        out.push_str("...");
+    }
+    Some(out)
+}
+
+fn is_useful_summary(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    !trimmed.is_empty() && trimmed != "-" && trimmed != "." && trimmed != "..."
+}
+
 impl SummarizerCommand {
     fn description(&self) -> String {
         match self {
             SummarizerCommand::Binary(path) => format!("tried {:?}", path),
             SummarizerCommand::CargoRun { workspace_root } => {
-                format!("tried cargo run -p hive-summarizer in {:?}", workspace_root)
+                format!(
+                    "tried cargo run -p hive-summarizer --release in {:?}",
+                    workspace_root
+                )
             }
         }
     }

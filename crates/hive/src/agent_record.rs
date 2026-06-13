@@ -45,9 +45,14 @@ pub struct AgentRecord {
     pub id: String,
 
     /// Summary (string) of what the agent is working on.
-    /// Can come from the agent's native summary (e.g. session_summary) or
-    /// be generated/refined by a small local LLM from the full transcript.
+    /// This starts as the agent's native summary. The CLI may replace it with
+    /// a generated display summary before rendering.
     pub summary: String,
+
+    /// User-side transcript text extracted from the session, when available.
+    /// Processors populate this as raw parsed data; higher layers decide whether
+    /// to summarize it.
+    pub user_text: Option<String>,
 
     /// Current status of the agent.
     pub status: AgentStatus,
@@ -77,11 +82,17 @@ impl AgentRecord {
         Self {
             id: id.into(),
             summary: summary.into(),
+            user_text: None,
             status,
             last_generated_msg,
             working_dir,
             source,
         }
+    }
+
+    pub fn with_user_text(mut self, user_text: Option<String>) -> Self {
+        self.user_text = user_text.filter(|text| !text.trim().is_empty());
+        self
     }
 }
 
@@ -104,6 +115,7 @@ mod tests {
 
         assert_eq!(record.id, "test-id-123");
         assert_eq!(record.summary, "Refactoring the auth module to use async");
+        assert_eq!(record.user_text, None);
         assert_eq!(record.status, AgentStatus::Thinking);
         assert_eq!(
             record.working_dir,

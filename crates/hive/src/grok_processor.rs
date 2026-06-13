@@ -65,6 +65,13 @@ struct ChatRecord {
 /// Falls back to a time-based heuristic only when chat_history.jsonl is absent
 /// or unreadable.
 pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
+    parse_grok_sessions_with_filter(base_dir, None)
+}
+
+fn parse_grok_sessions_with_filter(
+    base_dir: &Path,
+    cwd_filter: Option<&Path>,
+) -> Result<Vec<AgentRecord>> {
     let mut records: Vec<AgentRecord> = Vec::new();
 
     if !base_dir.exists() {
@@ -93,8 +100,9 @@ pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
                 continue;
             }
 
-            match parse_single_session(&session_dir) {
-                Ok(record) => records.push(record),
+            match parse_single_session(&session_dir, cwd_filter) {
+                Ok(Some(record)) => records.push(record),
+                Ok(None) => {}
                 Err(err) => {
                     // Non-fatal: one bad session should not kill the whole scan.
                     eprintln!("Warning: skipping Grok session {:?}: {}", session_dir, err);
@@ -114,14 +122,13 @@ pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
 /// Useful for project-scoped queries (e.g. `hive list` while inside a repo).
 #[allow(dead_code)]
 pub fn parse_grok_sessions_for_cwd(base_dir: &Path, cwd: &Path) -> Result<Vec<AgentRecord>> {
-    let all = parse_grok_sessions(base_dir)?;
-    Ok(all
-        .into_iter()
-        .filter(|r| r.working_dir == cwd || r.working_dir.starts_with(cwd))
-        .collect())
+    parse_grok_sessions_with_filter(base_dir, Some(cwd))
 }
 
-fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
+fn parse_single_session(
+    session_dir: &Path,
+    cwd_filter: Option<&Path>,
+) -> Result<Option<AgentRecord>> {
     let summary_path = session_dir.join("summary.json");
     let content = fs::read_to_string(&summary_path)
         .with_context(|| format!("reading {}", summary_path.display()))?;
@@ -131,32 +138,22 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
 
     let id = summary.info.id.clone();
     let working_dir = PathBuf::from(&summary.info.cwd);
+    if let Some(filter) = cwd_filter {
+        if working_dir != filter && !working_dir.starts_with(filter) {
+            return Ok(None);
+        }
+    }
 
     // Prefer a real session summary; fall back to the generated title (often shorter),
     // then a generic placeholder.
-    let mut summary_text = summary
+    let summary_text = summary
         .session_summary
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .or(summary.generated_title.as_deref())
         .unwrap_or("Untitled Grok session")
         .to_string();
-
-    // Optional: refine the summary using the external LLM summarizer (separate
-    // `hive-summarizer` process) when HIVE_LLM_SUMMARIES=1 and the native
-    // summary looks weak/short. This is the integration point for "summarize
-    // the discussion with the LLMs" from the full transcript.
-    if std::env::var("HIVE_LLM_SUMMARIES").is_ok() && summary_text.len() < 80 {
-        if let Some(full_transcript) =
-            extract_transcript_for_llm_summary(&session_dir.join("chat_history.jsonl"))
-        {
-            if let Ok(better) = crate::summarizer_client::summarize_via_external(&full_transcript) {
-                if !better.trim().is_empty() {
-                    summary_text = better;
-                }
-            }
-        }
-    }
+    let user_text = extract_user_text(&session_dir.join("chat_history.jsonl"));
 
     // Timestamp priority: last_active_at is the most meaningful for "last generated msg".
     let ts_str = summary
@@ -181,13 +178,16 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
             }
         });
 
-    Ok(AgentRecord::new(
-        id,
-        summary_text,
-        status,
-        last_generated_msg,
-        working_dir,
-        AgentSource::Grok,
+    Ok(Some(
+        AgentRecord::new(
+            id,
+            summary_text,
+            status,
+            last_generated_msg,
+            working_dir,
+            AgentSource::Grok,
+        )
+        .with_user_text(user_text),
     ))
 }
 
@@ -211,12 +211,7 @@ fn parse_grok_timestamp(s: &str) -> Result<DateTime<Utc>> {
     anyhow::bail!("unrecognized Grok timestamp format: {}", s)
 }
 
-/// Extract a bounded amount of conversation text from chat_history.jsonl
-/// suitable for sending to the LLM summarizer.
-///
-/// We keep it cheap (limited length) because the small T5 model has ~512 token context.
-/// Only called when HIVE_LLM_SUMMARIES=1.
-fn extract_transcript_for_llm_summary(chat_path: &Path) -> Option<String> {
+fn extract_user_text(chat_path: &Path) -> Option<String> {
     if !chat_path.exists() {
         return None;
     }
@@ -227,23 +222,26 @@ fn extract_transcript_for_llm_summary(chat_path: &Path) -> Option<String> {
             continue;
         }
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val.get("type").and_then(|v| v.as_str()) != Some("user") {
+                continue;
+            }
             // Common shapes in Grok chat_history:
             // - "content": "plain string"
             // - "content": [ {"type": "text", "text": "..."}, ... ]
             // - sometimes top-level "text" or "reasoning"
             if let Some(c) = val.get("content") {
                 if let Some(s) = c.as_str() {
-                    parts.push(s.to_string());
+                    push_user_text_part(&mut parts, s);
                 } else if let Some(arr) = c.as_array() {
                     for item in arr {
                         if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                            parts.push(t.to_string());
+                            push_user_text_part(&mut parts, t);
                         }
                     }
                 }
             }
             if let Some(t) = val.get("text").and_then(|v| v.as_str()) {
-                parts.push(t.to_string());
+                push_user_text_part(&mut parts, t);
             }
         }
         if parts.len() > 20 {
@@ -254,9 +252,15 @@ fn extract_transcript_for_llm_summary(chat_path: &Path) -> Option<String> {
         return None;
     }
     let joined = parts.join("\n\n");
-    // Hard truncate to something the small T5 can handle reasonably.
-    // The summarizer itself also truncates input ids to 512.
-    Some(joined.chars().take(1200).collect())
+    Some(joined)
+}
+
+fn push_user_text_part(parts: &mut Vec<String>, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with("<user_info>") {
+        return;
+    }
+    parts.push(trimmed.to_string());
 }
 
 /// Infer AgentStatus from the structure of chat_history.jsonl (preferred signal).
@@ -341,7 +345,9 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Helper that creates a realistic simulated Grok session tree under `base`.
@@ -422,9 +428,6 @@ mod tests {
     #[test]
     fn parses_single_session_from_simulated_directory_structure() {
         let _env_guard = env_lock();
-        // Ensure no LLM env leakage from sibling tests (env is process-global).
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
@@ -453,6 +456,7 @@ mod tests {
             r.summary,
             "Initialize Git Repository in Local Directory and explore worktrees"
         );
+        assert_eq!(r.user_text.as_deref(), Some("Please continue"));
         // 2 minutes ago is well inside the 10-minute Thinking window.
         assert_eq!(r.status, AgentStatus::Thinking);
     }
@@ -460,8 +464,6 @@ mod tests {
     #[test]
     fn returns_multiple_sessions_sorted_newest_first_and_infers_waiting() {
         let _env_guard = env_lock();
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
@@ -517,9 +519,6 @@ mod tests {
     #[test]
     fn falls_back_to_generated_title_and_skips_when_no_summary_file() {
         let _env_guard = env_lock();
-        // Ensure no LLM env leakage from sibling tests (env is process-global).
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
@@ -550,8 +549,6 @@ mod tests {
     #[test]
     fn skips_malformed_json_without_panicking() {
         let _env_guard = env_lock();
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
@@ -587,8 +584,6 @@ mod tests {
     #[test]
     fn handles_nonexistent_base_dir_gracefully() {
         let _env_guard = env_lock();
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let records =
             parse_grok_sessions(Path::new("/definitely/not/a/real/grok/sessions/dir")).unwrap();
@@ -598,8 +593,6 @@ mod tests {
     #[test]
     fn parse_for_cwd_filters_correctly() {
         let _env_guard = env_lock();
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
@@ -648,49 +641,32 @@ mod tests {
     }
 
     #[test]
-    fn refines_weak_native_summary_via_llm_client_when_env_set() {
+    fn extracts_user_text_without_replacing_native_summary() {
         let _env_guard = env_lock();
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
         let ts = (Utc::now() - Duration::minutes(2)).to_rfc3339();
 
-        // Create a session whose native summary is deliberately short/weak.
-        // The chat_history will be used by the extractor when HIVE_LLM_SUMMARIES=1.
         create_mock_grok_session(
             base,
             "encoded-llm",
             "llm-session-123",
             "/project/llm-test",
-            Some("short"), // weak native summary -> will trigger refinement
+            Some("short"),
             None,
             &ts,
-            "assistant",
+            "user",
             AgentSource::Grok,
         );
 
-        // Force the LLM path + use the hermetic passthrough so we don't need a real binary
-        // and don't trigger heavy ML compilation in the light crate tests.
-        // Clean first in case previous test left state (tests can share process).
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
-
-        std::env::set_var("HIVE_LLM_SUMMARIES", "1");
-        std::env::set_var("HIVE_SUMMARIZER", "passthrough");
-
         let records = parse_grok_sessions(base).unwrap();
-
-        std::env::remove_var("HIVE_LLM_SUMMARIES");
-        std::env::remove_var("HIVE_SUMMARIZER");
 
         let rec = records
             .iter()
             .find(|r| r.id == "llm-session-123")
             .expect("session should be present");
-        assert!(
-            rec.summary.contains("[passthrough]"),
-            "expected the summary to have been refined via the (passthrough) LLM client, got: {}",
-            rec.summary
-        );
+        assert_eq!(rec.summary, "short");
+        assert_eq!(rec.user_text.as_deref(), Some("Please continue"));
     }
 }

@@ -21,28 +21,44 @@ use crate::agent_record::{AgentRecord, AgentSource, AgentStatus};
 ///
 /// Records are returned sorted by last_generated_msg descending.
 pub fn parse_codex_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
+    parse_codex_sessions_with_filter(base_dir, None)
+}
+
+pub fn parse_codex_sessions_for_cwd(base_dir: &Path, cwd: &Path) -> Result<Vec<AgentRecord>> {
+    parse_codex_sessions_with_filter(base_dir, Some(cwd))
+}
+
+fn parse_codex_sessions_with_filter(
+    base_dir: &Path,
+    cwd_filter: Option<&Path>,
+) -> Result<Vec<AgentRecord>> {
     let mut records: Vec<AgentRecord> = Vec::new();
 
     if !base_dir.exists() {
         return Ok(records);
     }
 
-    collect_rollout_files(base_dir, &mut records)?;
+    collect_rollout_files(base_dir, cwd_filter, &mut records)?;
 
     records.sort_by(|a, b| b.last_generated_msg.cmp(&a.last_generated_msg));
     Ok(records)
 }
 
-fn collect_rollout_files(dir: &Path, records: &mut Vec<AgentRecord>) -> Result<()> {
+fn collect_rollout_files(
+    dir: &Path,
+    cwd_filter: Option<&Path>,
+    records: &mut Vec<AgentRecord>,
+) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("reading codex dir {:?}", dir))? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_rollout_files(&path, records)?;
+            collect_rollout_files(&path, cwd_filter, records)?;
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("rollout-") && name.ends_with(".jsonl") {
-                match parse_rollout_file(&path) {
-                    Ok(record) => records.push(record),
+                match parse_rollout_file(&path, cwd_filter) {
+                    Ok(Some(record)) => records.push(record),
+                    Ok(None) => {}
                     Err(err) => {
                         eprintln!("Warning: skipping Codex rollout {:?}: {}", path, err);
                     }
@@ -80,7 +96,7 @@ fn parse_rollout_timestamp_from_filename(path: &Path) -> Option<DateTime<Utc>> {
     None
 }
 
-fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
+fn parse_rollout_file(path: &Path, cwd_filter: Option<&Path>) -> Result<Option<AgentRecord>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
@@ -106,6 +122,7 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
     let mut pending_tools = 0i32;
     let mut active_turns: HashSet<String> = HashSet::new();
     let mut anonymous_active_turns = 0i32;
+    let mut user_text_parts: Vec<String> = Vec::new();
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -143,10 +160,11 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                                 match pt {
                                     "user_message" => {
                                         last_was_user = true;
-                                        if summary.is_none() {
-                                            if let Some(msg) =
-                                                payload.get("message").and_then(|v| v.as_str())
-                                            {
+                                        if let Some(msg) =
+                                            payload.get("message").and_then(|v| v.as_str())
+                                        {
+                                            user_text_parts.push(msg.to_string());
+                                            if summary.is_none() {
                                                 summary =
                                                     Some(msg.chars().take(120).collect::<String>());
                                             }
@@ -227,19 +245,14 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
         .map(PathBuf::from)
         .or_else(|| path.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let mut summary_text = summary.unwrap_or_else(|| "Untitled Codex session".to_string());
-
-    // Optional LLM refinement (same as Grok) when HIVE_LLM_SUMMARIES=1 and native
-    // summary is weak. For a fuller transcript we would accumulate more content
-    // from the rollout events while scanning.
-    if std::env::var("HIVE_LLM_SUMMARIES").is_ok() && summary_text.len() < 80 {
-        if let Ok(better) = crate::summarizer_client::summarize_via_external(&summary_text) {
-            if !better.trim().is_empty() {
-                summary_text = better;
-            }
+    if let Some(filter) = cwd_filter {
+        if working_dir != filter && !working_dir.starts_with(filter) {
+            return Ok(None);
         }
     }
+
+    let summary_text = summary.unwrap_or_else(|| "Untitled Codex session".to_string());
+    let user_text = joined_user_text(user_text_parts);
 
     // Prefer clean id from session_meta if we saw one; for now we keep filename-based id
     // (the meta id is the same as the uuid in the filename in the example).
@@ -252,14 +265,27 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
         AgentStatus::Waiting
     };
 
-    Ok(AgentRecord::new(
-        id,
-        summary_text,
-        status,
-        last_generated_msg,
-        working_dir,
-        AgentSource::Codex,
+    Ok(Some(
+        AgentRecord::new(
+            id,
+            summary_text,
+            status,
+            last_generated_msg,
+            working_dir,
+            AgentSource::Codex,
+        )
+        .with_user_text(user_text),
     ))
+}
+
+fn joined_user_text(parts: Vec<String>) -> Option<String> {
+    let joined = parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!joined.is_empty()).then_some(joined)
 }
 
 #[cfg(test)]
