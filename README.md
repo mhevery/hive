@@ -96,7 +96,7 @@ A separate binary `hive-summarizer` provides local text summarization (currently
 - The companion embeds the Falconsai/text_summarization config, tokenizer, and weights, so it does not need internet access or a Hugging Face cache at runtime.
 - Build the companion with `cargo build -p hive-summarizer --release`.
 - Make it discoverable by placing it next to `hive`, in PATH, or via `HIVE_SUMMARIZER=/path/to/hive-summarizer`.
-- Direct use: `cat transcript.txt | hive-summarizer`
+- Direct use: `cat transcript.txt | hive-summarizer -`
 
 This design lets the core observer tool stay lightweight while still allowing high-quality local LLM summaries of full agent discussions/transcripts (future integration into processors for better `AgentRecord` summaries is planned).
 

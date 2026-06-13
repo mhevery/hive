@@ -147,10 +147,15 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
                 .arg(workspace_root.join("Cargo.toml"))
                 .arg("-p")
                 .arg("hive-summarizer")
-                .arg("--");
+                .arg("--")
+                .arg("-");
             c
         }
-        SummarizerCommand::Binary(bin) => Command::new(bin),
+        SummarizerCommand::Binary(bin) => {
+            let mut c = Command::new(bin);
+            c.arg("-");
+            c
+        }
     };
 
     let mut child = cmd
