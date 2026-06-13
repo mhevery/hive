@@ -71,7 +71,7 @@ impl TextSummarizer {
             return Ok(String::new());
         }
 
-        let prompt = format!("summarize in one short sentence: {}", text);
+        let prompt = format!("summarize: {}", text);
 
         // Tokenize (no special tokens added by us; the tokenizer and model handle it)
         let encoding = self
@@ -182,6 +182,7 @@ across different working directories and projects.";
             !summary.is_empty(),
             "expected a non-empty summary, got empty string"
         );
+        assert_ne!(summary, "-", "summary should not be a placeholder");
         // The exact wording varies across model/runtime versions, but it should stay concise.
         assert!(
             summary.len() < input.len() / 2,
