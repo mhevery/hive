@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
-use crate::agent_record::{AgentRecord, AgentStatus};
+use crate::agent_record::{AgentRecord, AgentSource, AgentStatus};
 
 /// Deserializable subset of Grok's summary.json.
 /// We only pull the fields we need for AgentRecord construction.
@@ -175,6 +175,7 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
         status,
         last_generated_msg,
         working_dir,
+        AgentSource::Grok,
     ))
 }
 
@@ -287,6 +288,7 @@ mod tests {
         generated_title: Option<&str>,
         last_active_at: &str,
         last_speaker: &str,   // "user" or "assistant" (drives structural status)
+        source: AgentSource,
     ) -> PathBuf {
         let session_dir = base.join(encoded_cwd).join(session_id);
         fs::create_dir_all(&session_dir).expect("create session dir");
@@ -354,6 +356,7 @@ mod tests {
             Some("Hive: Main"),
             &recent_ts,
             "user",   // last speaker = user → structural Thinking
+            AgentSource::Grok,
         );
 
         let records = parse_grok_sessions(base).unwrap();
@@ -389,6 +392,7 @@ mod tests {
             None,
             &very_recent,
             "user",   // last speaker = user → structural Thinking
+            AgentSource::Grok,
         );
 
         create_mock_grok_session(
@@ -400,6 +404,7 @@ mod tests {
             None,
             &old,
             "assistant", // last speaker = assistant, no pending tools → Waiting
+            AgentSource::Grok,
         );
 
         let records = parse_grok_sessions(base).unwrap();
@@ -430,6 +435,7 @@ mod tests {
             Some("Important work happening here"),
             "2026-06-01T10:00:00Z",
             "assistant",
+            AgentSource::Grok,
         );
 
         // A directory that looks like a session but has no summary.json (should be ignored)
@@ -453,7 +459,7 @@ mod tests {
 
         // Also a good one so we can prove we still parse the valid ones
         let good_ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "enc", "good", "/good", Some("Good summary"), None, &good_ts, "assistant");
+        create_mock_grok_session(base, "enc", "good", "/good", Some("Good summary"), None, &good_ts, "assistant", AgentSource::Grok);
 
         let records = parse_grok_sessions(base).unwrap();
         // Only the good one made it through
@@ -473,9 +479,9 @@ mod tests {
         let base = tmp.path();
 
         let ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "e1", "s1", "/project/a", Some("In a"), None, &ts, "assistant");
-        create_mock_grok_session(base, "e2", "s2", "/project/b/sub", Some("In b/sub"), None, &ts, "assistant");
-        create_mock_grok_session(base, "e3", "s3", "/completely/other", Some("Other"), None, &ts, "assistant");
+        create_mock_grok_session(base, "e1", "s1", "/project/a", Some("In a"), None, &ts, "assistant", AgentSource::Grok);
+        create_mock_grok_session(base, "e2", "s2", "/project/b/sub", Some("In b/sub"), None, &ts, "assistant", AgentSource::Grok);
+        create_mock_grok_session(base, "e3", "s3", "/completely/other", Some("Other"), None, &ts, "assistant", AgentSource::Grok);
 
         let filtered = parse_grok_sessions_for_cwd(base, Path::new("/project")).unwrap();
         assert_eq!(filtered.len(), 2); // a and b/sub match starts_with

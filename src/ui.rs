@@ -109,6 +109,7 @@ fn build_table_rows(records: &[AgentRecord]) -> (Vec<Row>, Vec<(usize, String)>)
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
+                Cell::from(""),
             ]));
         }
 
@@ -119,6 +120,7 @@ fn build_table_rows(records: &[AgentRecord]) -> (Vec<Row>, Vec<(usize, String)>)
         // across the entire row width for the "spill" visual.
         // This prevents the clipped dir from appearing in the narrow "Dir" column.
         let group_header = Row::new(vec![
+            Cell::from(""),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -138,9 +140,11 @@ fn build_table_rows(records: &[AgentRecord]) -> (Vec<Row>, Vec<(usize, String)>)
                 AgentStatus::Waiting => Style::default().fg(Color::DarkGray),
             };
             let status_cell = Cell::from(s.status.to_string()).style(status_style);
+            let agent_cell = Cell::from(s.source.to_string());
 
             let data_row = Row::new(vec![
                 Cell::from("  "),
+                agent_cell,
                 status_cell,
                 Cell::from(s.id.clone()),
                 Cell::from(s.summary.clone()),
@@ -159,15 +163,14 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
         return Ok(());
     }
 
-    let header = Row::new(vec!["Dir", "Status", "ID", "Summary", "Last Active"])
+    let header = Row::new(vec!["Dir", "Agent", "Status", "ID", "Summary", "Last Active"])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
-    // First column capped at 5 characters (just enough for the "Dir" header).
-    // On group header rows the full directory path is spread across the row
-    // during post-processing (spilling over the empty columns).
+    // Dir capped at 5 (as requested). Agent column added to distinguish Grok vs Codex.
     let widths = [
         Constraint::Max(5),     // Dir - max width 5
+        Constraint::Length(7),  // Agent (Grok / Codex)
         Constraint::Length(9),  // Status
         Constraint::Length(37), // full session ID
         Constraint::Min(22),    // Summary
@@ -266,16 +269,17 @@ pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentR
         return;
     }
 
-    let header = Row::new(vec!["Dir", "Status", "ID", "Summary", "Last Active"])
+    let header = Row::new(vec!["Dir", "Agent", "Status", "ID", "Summary", "Last Active"])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
     let widths = [
-        Constraint::Max(5),
-        Constraint::Length(9),
-        Constraint::Length(37),
-        Constraint::Min(22),
-        Constraint::Min(13),
+        Constraint::Max(5),     // Dir
+        Constraint::Length(7),  // Agent (Grok / Codex)
+        Constraint::Length(9),  // Status
+        Constraint::Length(37), // ID
+        Constraint::Min(22),    // Summary
+        Constraint::Min(13),    // Last Active
     ];
 
     let title = if watch {

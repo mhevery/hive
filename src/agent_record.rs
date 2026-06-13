@@ -20,6 +20,22 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
+/// The source/agent type for the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSource {
+    Grok,
+    Codex,
+}
+
+impl std::fmt::Display for AgentSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentSource::Grok => write!(f, "Grok"),
+            AgentSource::Codex => write!(f, "Codex"),
+        }
+    }
+}
+
 /// A record storing data about a single agent session.
 /// This is the core uniform representation used by Hive for its dashboard/overview,
 /// regardless of the underlying agent (Grok Build, Codex, Claude, Aider, etc.).
@@ -42,6 +58,9 @@ pub struct AgentRecord {
     /// Working directory of where the conversation took place.
     /// This is the key field for knowing "in which directory" the agent was operating.
     pub working_dir: PathBuf,
+
+    /// The agent source (Grok or Codex).
+    pub source: AgentSource,
 }
 
 impl AgentRecord {
@@ -53,6 +72,7 @@ impl AgentRecord {
         status: AgentStatus,
         last_generated_msg: DateTime<Utc>,
         working_dir: PathBuf,
+        source: AgentSource,
     ) -> Self {
         Self {
             id: id.into(),
@@ -60,6 +80,7 @@ impl AgentRecord {
             status,
             last_generated_msg,
             working_dir,
+            source,
         }
     }
 }
@@ -78,6 +99,7 @@ mod tests {
             AgentStatus::Thinking,
             Utc::now(),
             PathBuf::from("/Users/misko/work/some-project"),
+            AgentSource::Grok,
         );
 
         assert_eq!(record.id, "test-id-123");
@@ -85,5 +107,6 @@ mod tests {
         assert_eq!(record.status, AgentStatus::Thinking);
         assert_eq!(record.working_dir, PathBuf::from("/Users/misko/work/some-project"));
         assert_eq!(record.status.to_string(), "Thinking");
+        assert_eq!(record.source.to_string(), "Grok");
     }
 }

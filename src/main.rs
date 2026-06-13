@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod agent_record;
+mod codex_processor;
 mod grok_processor;
 mod ui;
 
@@ -72,20 +73,42 @@ fn run_list(watch: bool) -> Result<()> {
     }
 }
 
-fn load_records(sessions_root: &Option<PathBuf>) -> Vec<AgentRecord> {
-    match sessions_root {
-        Some(root) => match grok_processor::parse_grok_sessions(root) {
-            Ok(recs) => recs,
+fn load_records(grok_root: &Option<PathBuf>) -> Vec<AgentRecord> {
+    let mut records: Vec<AgentRecord> = vec![];
+
+    // Grok
+    if let Some(root) = grok_root {
+        match grok_processor::parse_grok_sessions(root) {
+            Ok(mut recs) => records.append(&mut recs),
             Err(e) => {
                 eprintln!("Warning: failed to parse Grok sessions under {:?}: {}", root, e);
-                Vec::new()
             }
-        },
-        None => {
-            eprintln!("Could not determine Grok sessions directory.");
-            Vec::new()
         }
     }
+
+    // Codex - prefer ~/.codex/sessions (real location from user data), then CODEX_SESSIONS_DIR, then ~/sessions
+    let codex_root: Option<PathBuf> = std::env::var_os("CODEX_SESSIONS_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join("sessions"))
+        });
+    if let Some(root) = codex_root {
+        match codex_processor::parse_codex_sessions(&root) {
+            Ok(mut recs) => records.append(&mut recs),
+            Err(e) => {
+                eprintln!("Warning: failed to parse Codex sessions under {:?}: {}", root, e);
+            }
+        }
+    }
+
+    // Sort combined newest first
+    records.sort_by(|a, b| b.last_generated_msg.cmp(&a.last_generated_msg));
+    records
 }
 
 fn render_once(records: &[AgentRecord]) -> Result<()> {
@@ -101,14 +124,37 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::channel();
-    let mut watcher: RecommendedWatcher =
-        RecommendedWatcher::new(tx, notify::Config::default()).expect("failed to create watcher");
+    let mut watchers: Vec<RecommendedWatcher> = vec![];
 
+    // Watch Grok root
     if let Some(root) = sessions_root {
         if root.exists() {
-            watcher
-                .watch(root, RecursiveMode::Recursive)
-                .expect("failed to watch sessions directory");
+            let mut w: RecommendedWatcher =
+                RecommendedWatcher::new(tx.clone(), notify::Config::default()).expect("failed to create watcher");
+            if w.watch(&root, RecursiveMode::Recursive).is_ok() {
+                watchers.push(w);
+            }
+        }
+    }
+
+    // Watch Codex root too (if different)
+    let codex_root: Option<PathBuf> = std::env::var_os("CODEX_SESSIONS_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join("sessions"))
+        });
+    if let Some(root) = codex_root {
+        if root.exists() {
+            let mut w: RecommendedWatcher =
+                RecommendedWatcher::new(tx.clone(), notify::Config::default()).expect("failed to create watcher");
+            if w.watch(&root, RecursiveMode::Recursive).is_ok() {
+                watchers.push(w);
+            }
         }
     }
 
