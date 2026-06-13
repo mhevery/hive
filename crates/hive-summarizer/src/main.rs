@@ -51,7 +51,9 @@ fn run() -> Result<()> {
 
     // Inform the user on stderr so that stdout remains a clean summary (important
     // both for piping and for the parent `hive` process).
-    eprintln!("Loading Falconsai/text_summarization model (first run downloads weights to HF cache)...");
+    eprintln!(
+        "Loading Falconsai/text_summarization model (first run downloads weights to HF cache)..."
+    );
     eprintln!("(This requires internet access on first run.)");
 
     let mut summarizer = TextSummarizer::new()?;

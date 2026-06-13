@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 
 /// Status of an agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +105,10 @@ mod tests {
         assert_eq!(record.id, "test-id-123");
         assert_eq!(record.summary, "Refactoring the auth module to use async");
         assert_eq!(record.status, AgentStatus::Thinking);
-        assert_eq!(record.working_dir, PathBuf::from("/Users/misko/work/some-project"));
+        assert_eq!(
+            record.working_dir,
+            PathBuf::from("/Users/misko/work/some-project")
+        );
         assert_eq!(record.status.to_string(), "Thinking");
         assert_eq!(record.source.to_string(), "Grok");
     }

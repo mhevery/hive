@@ -13,8 +13,9 @@ readme = false
 candle-core = "0.5"
 candle-nn = "0.5"
 candle-transformers = "0.5"
-hf-hub = "0.3"
 tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
+
+# For reliable model file downloads.
 ureq = "2.12"
 
 # Pins to help the resolver pick compatible rand 0.8 + older half + older gemm

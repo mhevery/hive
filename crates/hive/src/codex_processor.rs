@@ -63,7 +63,7 @@ fn parse_rollout_timestamp_from_filename(path: &Path) -> Option<DateTime<Utc>> {
         return None;
     }
     let time_part = &rest[..19]; // "2026-04-01T20-21-23"
-    // Replace the two '-' in the time portion with ':'
+                                 // Replace the two '-' in the time portion with ':'
     if let Some(t_pos) = time_part.find('T') {
         let date = &time_part[..=t_pos];
         let time = &time_part[t_pos + 1..];
@@ -80,8 +80,8 @@ fn parse_rollout_timestamp_from_filename(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     let mut max_ts: Option<DateTime<Utc>> = parse_rollout_timestamp_from_filename(path);
     if let Ok(meta) = fs::metadata(path) {
@@ -141,8 +141,11 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                                     "user_message" => {
                                         last_was_user = true;
                                         if summary.is_none() {
-                                            if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
-                                                summary = Some(msg.chars().take(120).collect::<String>());
+                                            if let Some(msg) =
+                                                payload.get("message").and_then(|v| v.as_str())
+                                            {
+                                                summary =
+                                                    Some(msg.chars().take(120).collect::<String>());
                                             }
                                         }
                                     }
@@ -154,7 +157,11 @@ fn parse_rollout_file(path: &Path) -> Result<AgentRecord> {
                                             if let Some(c) = payload
                                                 .get("cwd")
                                                 .and_then(|v| v.as_str())
-                                                .or_else(|| payload.get("working_dir").and_then(|v| v.as_str()))
+                                                .or_else(|| {
+                                                    payload
+                                                        .get("working_dir")
+                                                        .and_then(|v| v.as_str())
+                                                })
                                             {
                                                 cwd = Some(c.to_string());
                                             }
@@ -264,10 +271,14 @@ mod tests {
         }
 
         if has_user_last {
-            content.push_str(r#"{"type":"event_msg","payload":{"type":"user_message","message":"Now do more"}}"#);
+            content.push_str(
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Now do more"}}"#,
+            );
             content.push('\n');
         } else if !has_pending_tool {
-            content.push_str(r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Done."}}"#);
+            content.push_str(
+                r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Done."}}"#,
+            );
             content.push('\n');
         }
 
@@ -280,16 +291,38 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        create_mock_codex_rollout(base, "rollout-1.jsonl", "/Users/misko/work/project1", true, false); // user last → Thinking
-        create_mock_codex_rollout(base, "rollout-2.jsonl", "/Users/misko/work/project2", false, true); // pending tool → Thinking
-        create_mock_codex_rollout(base, "rollout-3.jsonl", "/Users/misko/work/project3", false, false); // completed → Waiting
+        create_mock_codex_rollout(
+            base,
+            "rollout-1.jsonl",
+            "/Users/misko/work/project1",
+            true,
+            false,
+        ); // user last → Thinking
+        create_mock_codex_rollout(
+            base,
+            "rollout-2.jsonl",
+            "/Users/misko/work/project2",
+            false,
+            true,
+        ); // pending tool → Thinking
+        create_mock_codex_rollout(
+            base,
+            "rollout-3.jsonl",
+            "/Users/misko/work/project3",
+            false,
+            false,
+        ); // completed → Waiting
 
         let records = parse_codex_sessions(base).unwrap();
         assert_eq!(records.len(), 3);
 
         // sorted newest first by mtime, but since created in order, and mtime may be same, we don't assert order strictly but status
-        let has_thinking = records.iter().any(|r| r.status == AgentStatus::Thinking && r.source == AgentSource::Codex);
-        let has_waiting = records.iter().any(|r| r.status == AgentStatus::Waiting && r.source == AgentSource::Codex);
+        let has_thinking = records
+            .iter()
+            .any(|r| r.status == AgentStatus::Thinking && r.source == AgentSource::Codex);
+        let has_waiting = records
+            .iter()
+            .any(|r| r.status == AgentStatus::Waiting && r.source == AgentSource::Codex);
         assert!(has_thinking);
         assert!(has_waiting);
     }

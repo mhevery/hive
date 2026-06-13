@@ -72,8 +72,7 @@ fn run_list(watch: bool) -> Result<()> {
     let sessions_root: Option<PathBuf> = std::env::var_os("GROK_SESSIONS_DIR")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".grok").join("sessions"))
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".grok").join("sessions"))
         });
 
     if !watch {
@@ -92,7 +91,10 @@ fn load_records(grok_root: &Option<PathBuf>) -> Vec<AgentRecord> {
         match grok_processor::parse_grok_sessions(root) {
             Ok(mut recs) => records.append(&mut recs),
             Err(e) => {
-                eprintln!("Warning: failed to parse Grok sessions under {:?}: {}", root, e);
+                eprintln!(
+                    "Warning: failed to parse Grok sessions under {:?}: {}",
+                    root, e
+                );
             }
         }
     }
@@ -101,18 +103,17 @@ fn load_records(grok_root: &Option<PathBuf>) -> Vec<AgentRecord> {
     let codex_root: Option<PathBuf> = std::env::var_os("CODEX_SESSIONS_DIR")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex").join("sessions"))
         })
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join("sessions"))
-        });
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("sessions")));
     if let Some(root) = codex_root {
         match codex_processor::parse_codex_sessions(&root) {
             Ok(mut recs) => records.append(&mut recs),
             Err(e) => {
-                eprintln!("Warning: failed to parse Codex sessions under {:?}: {}", root, e);
+                eprintln!(
+                    "Warning: failed to parse Codex sessions under {:?}: {}",
+                    root, e
+                );
             }
         }
     }
@@ -141,7 +142,8 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
     if let Some(root) = sessions_root {
         if root.exists() {
             let mut w: RecommendedWatcher =
-                RecommendedWatcher::new(tx.clone(), notify::Config::default()).expect("failed to create watcher");
+                RecommendedWatcher::new(tx.clone(), notify::Config::default())
+                    .expect("failed to create watcher");
             if w.watch(&root, RecursiveMode::Recursive).is_ok() {
                 watchers.push(w);
             }
@@ -152,17 +154,14 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
     let codex_root: Option<PathBuf> = std::env::var_os("CODEX_SESSIONS_DIR")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex").join("sessions"))
         })
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join("sessions"))
-        });
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("sessions")));
     if let Some(root) = codex_root {
         if root.exists() {
             let mut w: RecommendedWatcher =
-                RecommendedWatcher::new(tx.clone(), notify::Config::default()).expect("failed to create watcher");
+                RecommendedWatcher::new(tx.clone(), notify::Config::default())
+                    .expect("failed to create watcher");
             if w.watch(&root, RecursiveMode::Recursive).is_ok() {
                 watchers.push(w);
             }
@@ -200,7 +199,9 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
                 if event::poll(key_poll)? {
                     if let Event::Key(key) = event::read()? {
                         let is_ctrl_c = key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL);
                         if key.code == KeyCode::Char('q')
                             || key.code == KeyCode::Char('Q')
                             || key.code == KeyCode::Esc
@@ -223,11 +224,7 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
 
     // Always restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        cursor::Show,
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), cursor::Show, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     match result {
@@ -296,5 +293,3 @@ fn run_summarize(text: Option<Vec<String>>) -> Result<()> {
         }
     }
 }
-
-

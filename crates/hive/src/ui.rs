@@ -2,11 +2,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use crossterm::{
     queue,
-    style::{Attribute, Color as CrosstermColor, Print, style, ResetColor, Stylize},
+    style::{style, Attribute, Color as CrosstermColor, Print, ResetColor, Stylize},
     terminal,
 };
-use std::io::Write;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ratatui::{
@@ -89,9 +89,7 @@ pub fn group_records<'a>(records: &'a [AgentRecord]) -> Vec<(PathBuf, Vec<&'a Ag
 
     // Collect groups and sort them alphabetically by directory (using the displayed ~ form)
     let mut group_list: Vec<(PathBuf, Vec<&'a AgentRecord>)> = groups.into_iter().collect();
-    group_list.sort_by(|(a, _), (b, _)| {
-        format_working_dir(a).cmp(&format_working_dir(b))
-    });
+    group_list.sort_by(|(a, _), (b, _)| format_working_dir(a).cmp(&format_working_dir(b)));
 
     group_list
 }
@@ -163,9 +161,16 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
         return Ok(());
     }
 
-    let header = Row::new(vec!["Dir", "Agent", "Status", "ID", "Summary", "Last Active"])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "Dir",
+        "Agent",
+        "Status",
+        "ID",
+        "Summary",
+        "Last Active",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     // Dir capped at 5 (as requested). Agent column added to distinguish Grok vs Codex.
     let widths = [
@@ -261,7 +266,12 @@ pub fn render_sessions_table(records: &[AgentRecord]) -> Result<()> {
 /// visual consistency (including the narrow "Dir" column and blank separators).
 /// Then overlays full-width directory text on the group header rows to
 /// replicate the "spill" effect.
-pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentRecord], watch: bool) {
+pub fn render_sessions_to_frame(
+    frame: &mut Frame,
+    area: Rect,
+    records: &[AgentRecord],
+    watch: bool,
+) {
     let (rows, header_dirs) = build_table_rows(records);
     if rows.is_empty() {
         let msg = Paragraph::new("No agent sessions found.");
@@ -269,9 +279,16 @@ pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentR
         return;
     }
 
-    let header = Row::new(vec!["Dir", "Agent", "Status", "ID", "Summary", "Last Active"])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "Dir",
+        "Agent",
+        "Status",
+        "ID",
+        "Summary",
+        "Last Active",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     let widths = [
         Constraint::Max(5),     // Dir
@@ -290,11 +307,7 @@ pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentR
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .column_spacing(1);
 
     frame.render_widget(table, area);
@@ -311,12 +324,19 @@ pub fn render_sessions_to_frame(frame: &mut Frame, area: Rect, records: &[AgentR
         let row_y = area.y + table_header_height + body_idx as u16;
         if row_y < area.y + area.height {
             let text = if full_dir.len() < inner_w as usize {
-                format!("{}{}", full_dir, " ".repeat(inner_w as usize - full_dir.len()))
+                format!(
+                    "{}{}",
+                    full_dir,
+                    " ".repeat(inner_w as usize - full_dir.len())
+                )
             } else {
                 full_dir.clone()
             };
-            let dir_para = Paragraph::new(text)
-                .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
+            let dir_para = Paragraph::new(text).style(
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(Color::Cyan),
+            );
             let full_rect = Rect {
                 x: inner_x,
                 y: row_y,
@@ -341,7 +361,7 @@ fn to_crossterm_color(color: Color) -> Option<CrosstermColor> {
 /// Spread a directory path across the inner width of a row in the buffer.
 /// Used for group headers so the path can "spill" over the other (empty) columns.
 fn spread_dir_over_row(buf: &mut Buffer, y: u16, area: Rect, dir: &str) {
-    let start_x = area.x + 1;            // after left border
+    let start_x = area.x + 1; // after left border
     let max_x = area.x + area.width - 1; // before right border
 
     let style = Style::default()

@@ -44,10 +44,7 @@ fn find_summarizer_binary() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
         let home = PathBuf::from(home);
         for name in ["hive-summarizer", "hive-summarizer.exe"] {
-            let candidate = home
-                .join(".hive")
-                .join("bin")
-                .join(name);
+            let candidate = home.join(".hive").join("bin").join(name);
             if candidate.exists() {
                 return Ok(candidate);
             }
@@ -55,7 +52,11 @@ fn find_summarizer_binary() -> Result<PathBuf> {
     }
 
     // 4. Fall back to PATH lookup (manual, no extra crate, to keep MSRV low).
-    let path_candidate = PathBuf::from(if cfg!(windows) { "hive-summarizer.exe" } else { "hive-summarizer" });
+    let path_candidate = PathBuf::from(if cfg!(windows) {
+        "hive-summarizer.exe"
+    } else {
+        "hive-summarizer"
+    });
     if is_executable_on_path(&path_candidate) {
         return Ok(path_candidate);
     }
@@ -118,10 +119,7 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
     let mut cmd = if bin == PathBuf::from("__CARGO_RUN_HIVE_SUMMARIZER__") {
         // Dev convenience inside the workspace.
         let mut c = Command::new("cargo");
-        c.arg("run")
-            .arg("-p")
-            .arg("hive-summarizer")
-            .arg("--");
+        c.arg("run").arg("-p").arg("hive-summarizer").arg("--");
         c
     } else {
         Command::new(&bin)
@@ -135,7 +133,10 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
         .with_context(|| format!("failed to spawn summarizer (tried {:?})", bin))?;
 
     {
-        let stdin = child.stdin.as_mut().context("failed to open stdin of summarizer")?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open stdin of summarizer")?;
         use std::io::Write;
         stdin.write_all(text.as_bytes())?;
     }
@@ -151,8 +152,8 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
         );
     }
 
-    let summary = String::from_utf8(output.stdout)
-        .context("summarizer produced non-UTF8 output")?;
+    let summary =
+        String::from_utf8(output.stdout).context("summarizer produced non-UTF8 output")?;
 
     Ok(summary.trim().to_string())
 }

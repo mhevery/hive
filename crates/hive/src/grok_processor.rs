@@ -97,10 +97,7 @@ pub fn parse_grok_sessions(base_dir: &Path) -> Result<Vec<AgentRecord>> {
                 Ok(record) => records.push(record),
                 Err(err) => {
                     // Non-fatal: one bad session should not kill the whole scan.
-                    eprintln!(
-                        "Warning: skipping Grok session {:?}: {}",
-                        session_dir, err
-                    );
+                    eprintln!("Warning: skipping Grok session {:?}: {}", session_dir, err);
                 }
             }
         }
@@ -153,9 +150,7 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
         if let Some(full_transcript) =
             extract_transcript_for_llm_summary(&session_dir.join("chat_history.jsonl"))
         {
-            if let Ok(better) =
-                crate::summarizer_client::summarize_via_external(&full_transcript)
-            {
+            if let Ok(better) = crate::summarizer_client::summarize_via_external(&full_transcript) {
                 if !better.trim().is_empty() {
                     summary_text = better;
                 }
@@ -170,8 +165,7 @@ fn parse_single_session(session_dir: &Path) -> Result<AgentRecord> {
         .or(summary.created_at)
         .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    let last_generated_msg = parse_grok_timestamp(&ts_str)
-        .unwrap_or_else(|_| Utc::now());
+    let last_generated_msg = parse_grok_timestamp(&ts_str).unwrap_or_else(|_| Utc::now());
 
     // Prefer structural signals from chat_history.jsonl (pending tool calls,
     // last speaker being the user or an assistant mid-action).
@@ -295,11 +289,14 @@ fn infer_status_from_chat_history(chat_path: &Path) -> Option<AgentStatus> {
 
     // Find the last "speaker" (user or assistant), ignoring tool_result / system / text etc.
     // This is the primary signal.
-    let last_speaker = records.iter().rev().find_map(|r| match r.r#type.as_deref() {
-        Some("user") => Some("user"),
-        Some("assistant") => Some("assistant"),
-        _ => None,
-    });
+    let last_speaker = records
+        .iter()
+        .rev()
+        .find_map(|r| match r.r#type.as_deref() {
+            Some("user") => Some("user"),
+            Some("assistant") => Some("assistant"),
+            _ => None,
+        });
 
     match last_speaker {
         Some("user") => {
@@ -308,7 +305,10 @@ fn infer_status_from_chat_history(chat_path: &Path) -> Option<AgentStatus> {
         }
         Some("assistant") => {
             // Only for assistant do we look for pending tool activity after it.
-            let last_assistant_idx = records.iter().rposition(|r| r.r#type.as_deref() == Some("assistant")).unwrap();
+            let last_assistant_idx = records
+                .iter()
+                .rposition(|r| r.r#type.as_deref() == Some("assistant"))
+                .unwrap();
             let tool_results_after = records[last_assistant_idx + 1..]
                 .iter()
                 .filter(|r| r.r#type.as_deref() == Some("tool_result"))
@@ -353,7 +353,7 @@ mod tests {
         session_summary: Option<&str>,
         generated_title: Option<&str>,
         last_active_at: &str,
-        last_speaker: &str,   // "user" or "assistant" (drives structural status)
+        last_speaker: &str, // "user" or "assistant" (drives structural status)
         _source: AgentSource,
     ) -> PathBuf {
         let session_dir = base.join(encoded_cwd).join(session_id);
@@ -373,12 +373,18 @@ mod tests {
         );
 
         if let Some(s) = session_summary {
-            json.push_str(&format!(r#",
-    "session_summary": "{}""#, s));
+            json.push_str(&format!(
+                r#",
+    "session_summary": "{}""#,
+                s
+            ));
         }
         if let Some(t) = generated_title {
-            json.push_str(&format!(r#",
-    "generated_title": "{}""#, t));
+            json.push_str(&format!(
+                r#",
+    "generated_title": "{}""#,
+                t
+            ));
         }
 
         json.push_str("\n}");
@@ -396,7 +402,8 @@ mod tests {
         // (based on last speaker + pending tool calls) can be exercised by tests.
         let chat = if last_speaker == "user" {
             // Recent user input with no assistant reply yet → Thinking
-            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Please continue\"}]}\n".to_string()
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Please continue\"}]}\n"
+                .to_string()
         } else {
             // Last action was a completed assistant turn (no pending tools) → Waiting
             "{\"type\":\"assistant\",\"content\":\"Done.\",\"tool_calls\":[]}\n".to_string()
@@ -425,7 +432,7 @@ mod tests {
             Some("Initialize Git Repository in Local Directory and explore worktrees"),
             Some("Hive: Main"),
             &recent_ts,
-            "user",   // last speaker = user → structural Thinking
+            "user", // last speaker = user → structural Thinking
             AgentSource::Grok,
         );
 
@@ -461,7 +468,7 @@ mod tests {
             Some("Add grok processor and simulated dir tests"),
             None,
             &very_recent,
-            "user",   // last speaker = user → structural Thinking
+            "user", // last speaker = user → structural Thinking
             AgentSource::Grok,
         );
 
@@ -483,11 +490,17 @@ mod tests {
         // Newest first
         assert_eq!(records[0].id, "sess-recent");
         assert_eq!(records[0].status, AgentStatus::Thinking);
-        assert_eq!(records[0].working_dir, PathBuf::from("/Users/misko/work/HelloRust"));
+        assert_eq!(
+            records[0].working_dir,
+            PathBuf::from("/Users/misko/work/HelloRust")
+        );
 
         assert_eq!(records[1].id, "sess-old");
         assert_eq!(records[1].status, AgentStatus::Waiting);
-        assert_eq!(records[1].working_dir, PathBuf::from("/Users/misko/work/other-project"));
+        assert_eq!(
+            records[1].working_dir,
+            PathBuf::from("/Users/misko/work/other-project")
+        );
     }
 
     #[test]
@@ -529,11 +542,25 @@ mod tests {
 
         let bad_dir = base.join("enc").join("bad");
         fs::create_dir_all(&bad_dir).unwrap();
-        fs::write(bad_dir.join("summary.json"), "this is not { valid json at all").unwrap();
+        fs::write(
+            bad_dir.join("summary.json"),
+            "this is not { valid json at all",
+        )
+        .unwrap();
 
         // Also a good one so we can prove we still parse the valid ones
         let good_ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "enc", "good", "/good", Some("Good summary"), None, &good_ts, "assistant", AgentSource::Grok);
+        create_mock_grok_session(
+            base,
+            "enc",
+            "good",
+            "/good",
+            Some("Good summary"),
+            None,
+            &good_ts,
+            "assistant",
+            AgentSource::Grok,
+        );
 
         let records = parse_grok_sessions(base).unwrap();
         // Only the good one made it through
@@ -543,7 +570,8 @@ mod tests {
 
     #[test]
     fn handles_nonexistent_base_dir_gracefully() {
-        let records = parse_grok_sessions(Path::new("/definitely/not/a/real/grok/sessions/dir")).unwrap();
+        let records =
+            parse_grok_sessions(Path::new("/definitely/not/a/real/grok/sessions/dir")).unwrap();
         assert!(records.is_empty());
     }
 
@@ -553,9 +581,39 @@ mod tests {
         let base = tmp.path();
 
         let ts = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        create_mock_grok_session(base, "e1", "s1", "/project/a", Some("In a"), None, &ts, "assistant", AgentSource::Grok);
-        create_mock_grok_session(base, "e2", "s2", "/project/b/sub", Some("In b/sub"), None, &ts, "assistant", AgentSource::Grok);
-        create_mock_grok_session(base, "e3", "s3", "/completely/other", Some("Other"), None, &ts, "assistant", AgentSource::Grok);
+        create_mock_grok_session(
+            base,
+            "e1",
+            "s1",
+            "/project/a",
+            Some("In a"),
+            None,
+            &ts,
+            "assistant",
+            AgentSource::Grok,
+        );
+        create_mock_grok_session(
+            base,
+            "e2",
+            "s2",
+            "/project/b/sub",
+            Some("In b/sub"),
+            None,
+            &ts,
+            "assistant",
+            AgentSource::Grok,
+        );
+        create_mock_grok_session(
+            base,
+            "e3",
+            "s3",
+            "/completely/other",
+            Some("Other"),
+            None,
+            &ts,
+            "assistant",
+            AgentSource::Grok,
+        );
 
         let filtered = parse_grok_sessions_for_cwd(base, Path::new("/project")).unwrap();
         assert_eq!(filtered.len(), 2); // a and b/sub match starts_with
@@ -600,7 +658,10 @@ mod tests {
         std::env::remove_var("HIVE_LLM_SUMMARIES");
         std::env::remove_var("HIVE_SUMMARIZER");
 
-        let rec = records.iter().find(|r| r.id == "llm-session-123").expect("session should be present");
+        let rec = records
+            .iter()
+            .find(|r| r.id == "llm-session-123")
+            .expect("session should be present");
         assert!(
             rec.summary.contains("[passthrough]"),
             "expected the summary to have been refined via the (passthrough) LLM client, got: {}",
