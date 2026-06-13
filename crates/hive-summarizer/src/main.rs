@@ -15,8 +15,8 @@ use hive_summarizer::TextSummarizer;
 ///    hive-summarizer "some long text..."
 ///    cat transcript.txt | hive-summarizer
 ///
-/// On first run it will download the Falconsai/text_summarization weights (~240 MB)
-/// into the normal Hugging Face cache and then run inference on CPU.
+/// The Falconsai/text_summarization assets are embedded in the binary, so runtime
+/// inference does not require internet access or a populated Hugging Face cache.
 fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {:#}", e);
@@ -51,10 +51,7 @@ fn run() -> Result<()> {
 
     // Inform the user on stderr so that stdout remains a clean summary (important
     // both for piping and for the parent `hive` process).
-    eprintln!(
-        "Loading Falconsai/text_summarization model (first run downloads weights to HF cache)..."
-    );
-    eprintln!("(This requires internet access on first run.)");
+    eprintln!("Loading embedded Falconsai/text_summarization model...");
 
     let mut summarizer = TextSummarizer::new()?;
 

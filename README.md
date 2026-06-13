@@ -93,6 +93,7 @@ A separate binary `hive-summarizer` provides local text summarization (currently
 
 - `hive summarize "long text..."` (or pipe via stdin) will locate and invoke the companion binary.
 - The main `hive` binary has **no** dependency on the ML crates; the heavy work only runs when the summarizer process is spawned.
+- The companion embeds the Falconsai/text_summarization config, tokenizer, and weights, so it does not need internet access or a Hugging Face cache at runtime.
 - Build the companion with `cargo build -p hive-summarizer --release`.
 - Make it discoverable by placing it next to `hive`, in PATH, or via `HIVE_SUMMARIZER=/path/to/hive-summarizer`.
 - Direct use: `cat transcript.txt | hive-summarizer`

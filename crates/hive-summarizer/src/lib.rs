@@ -1,8 +1,15 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::t5::{Config, T5ForConditionalGeneration};
 use tokenizers::Tokenizer;
+
+const DEFAULT_REPO_ID: &str = "Falconsai/text_summarization";
+const EMBEDDED_CONFIG: &str = include_str!("../assets/Falconsai--text_summarization/config.json");
+const EMBEDDED_TOKENIZER: &[u8] =
+    include_bytes!("../assets/Falconsai--text_summarization/tokenizer.json");
+const EMBEDDED_WEIGHTS: &[u8] =
+    include_bytes!("../assets/Falconsai--text_summarization/model.safetensors");
 
 /// A thin wrapper around the Falconsai/text_summarization (T5) model loaded via Candle.
 ///
@@ -16,38 +23,32 @@ pub struct TextSummarizer {
 }
 
 impl TextSummarizer {
-    /// Load the default Falconsai/text_summarization model from the Hugging Face Hub.
-    /// Weights are cached by hf-hub under ~/.cache/huggingface/hub .
+    /// Load the default Falconsai/text_summarization model.
+    /// The model config, tokenizer, and weights are embedded in the binary.
     pub fn new() -> Result<Self> {
-        Self::new_from_repo("Falconsai/text_summarization")
+        Self::new_from_repo(DEFAULT_REPO_ID)
     }
 
-    /// Load from an arbitrary HF repo id (e.g. "google-t5/t5-small" for the base).
+    /// Load the embedded default model.
     pub fn new_from_repo(repo_id: &str) -> Result<Self> {
+        if repo_id != DEFAULT_REPO_ID {
+            bail!(
+                "hive-summarizer is built with embedded assets for {DEFAULT_REPO_ID}; \
+                 cannot load {repo_id} without adding that model to the binary"
+            );
+        }
+
         let device = Device::Cpu;
 
-        let config_path = hf_resolve_cached(repo_id, "config.json")
-            .with_context(|| format!("downloading config.json for {}", repo_id))?;
-        let tokenizer_path = hf_resolve_cached(repo_id, "tokenizer.json")
-            .with_context(|| format!("downloading tokenizer.json for {}", repo_id))?;
-        let weights_path = hf_resolve_cached(repo_id, "model.safetensors")
-            .with_context(|| format!("downloading model.safetensors for {}", repo_id))?;
+        let config: Config = serde_json::from_str(EMBEDDED_CONFIG)
+            .with_context(|| format!("parsing embedded T5 Config for {}", repo_id))?;
 
-        let config: Config = serde_json::from_str(
-            &std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {:?}", config_path))?,
-        )
-        .with_context(|| format!("parsing T5 Config for {}", repo_id))?;
-
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-            anyhow::anyhow!("failed to load tokenizer from {:?}: {}", tokenizer_path, e)
-        })?;
+        let tokenizer = Tokenizer::from_bytes(EMBEDDED_TOKENIZER)
+            .map_err(|e| anyhow::anyhow!("failed to load embedded tokenizer: {}", e))?;
 
         // Use F32 to match the "F32 weights ~240MB" description; the small model runs fine in F32 on CPU.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-                .context("creating VarBuilder from safetensors")?
-        };
+        let vb = VarBuilder::from_slice_safetensors(EMBEDDED_WEIGHTS, DType::F32, &device)
+            .context("creating VarBuilder from embedded safetensors")?;
 
         let model = T5ForConditionalGeneration::load(vb, &config)
             .context("loading T5ForConditionalGeneration weights into model")?;
@@ -70,7 +71,7 @@ impl TextSummarizer {
             return Ok(String::new());
         }
 
-        let prompt = format!("summarize: {}", text);
+        let prompt = format!("summarize in one short sentence: {}", text);
 
         // Tokenize (no special tokens added by us; the tokenizer and model handle it)
         let encoding = self
@@ -107,8 +108,8 @@ impl TextSummarizer {
         let mut output_ids: Vec<u32> = Vec::new();
         let mut decoder_token_id = decoder_start_token_id;
 
-        // Keep summaries short and sweet for this small model.
-        const MAX_NEW_TOKENS: usize = 128;
+        // Keep Hive list output scannable; this companion is used for quick agent overviews.
+        const MAX_NEW_TOKENS: usize = 32;
 
         for _ in 0..MAX_NEW_TOKENS {
             let decoder_tensor = Tensor::new(&[decoder_token_id], &self.device)
@@ -143,63 +144,15 @@ impl TextSummarizer {
             .decode(&output_ids, true)
             .map_err(|e| anyhow::anyhow!("tokenizer decode failed: {}", e))?;
 
-        Ok(summary.trim().to_string())
+        Ok(first_sentence(summary.trim()).to_string())
     }
 }
 
-fn hf_resolve_cached(repo_id: &str, filename: &str) -> Result<std::path::PathBuf> {
-    let cache_path = hive_hf_cache_dir()
-        .join(repo_id.replace('/', "--"))
-        .join(filename);
-    if cache_path.exists() {
-        return Ok(cache_path);
-    }
-
-    std::fs::create_dir_all(
-        cache_path
-            .parent()
-            .context("cache path should have a parent directory")?,
-    )
-    .with_context(|| format!("creating cache directory for {:?}", cache_path))?;
-
-    // Always use a fully qualified absolute URL.
-    // This avoids any "RelativeUrlWithoutBase" issues that can occur if
-    // HF_ENDPOINT is set to a relative or invalid value in the environment.
-    let url = format!("https://huggingface.co/{}/resolve/main/{}", repo_id, filename);
-    eprintln!("Downloading from {}", url);
-
-    let mut response = ureq::get(&url)
-        .call()
-        .with_context(|| format!("requesting {}", url))?
-        .into_reader();
-
-    let tmp_path = cache_path.with_extension("download");
-    {
-        let mut file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("creating temporary download {:?}", tmp_path))?;
-        std::io::copy(&mut response, &mut file)
-            .with_context(|| format!("writing download to {:?}", tmp_path))?;
-    }
-
-    std::fs::rename(&tmp_path, &cache_path)
-        .with_context(|| format!("moving {:?} into cache at {:?}", tmp_path, cache_path))?;
-
-    Ok(cache_path)
-}
-
-fn hive_hf_cache_dir() -> std::path::PathBuf {
-    if let Ok(hf_home) = std::env::var("HF_HOME") {
-        return std::path::PathBuf::from(hf_home)
-            .join("hub")
-            .join("hive-summarizer");
-    }
-
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".cache")
-        .join("huggingface")
-        .join("hub")
-        .join("hive-summarizer")
+fn first_sentence(summary: &str) -> &str {
+    summary
+        .find(['.', '!', '?'])
+        .map(|idx| summary[..=idx].trim())
+        .unwrap_or(summary)
 }
 
 #[cfg(test)]
@@ -207,13 +160,9 @@ mod tests {
     use super::*;
 
     /// This test demonstrates that we can load the Falconsai/text_summarization model
-    /// (via Candle + hf-hub) and use it to produce an abstractive summary.
+    /// (via Candle and embedded model assets) and use it to produce an abstractive summary.
     ///
-    /// It will:
-    /// - Download the model weights on first execution (cached afterwards)
-    /// - Run a short inference on CPU
-    ///
-    /// The first run may take a minute or two depending on bandwidth and CPU.
+    /// It will run a short inference on CPU without fetching anything from the network.
     #[test]
     fn falconsai_text_summarization_works() {
         let mut summarizer = TextSummarizer::new()
@@ -233,10 +182,10 @@ across different working directories and projects.";
             !summary.is_empty(),
             "expected a non-empty summary, got empty string"
         );
-        // The exact wording varies across model/runtime versions, but it should compress the input.
+        // The exact wording varies across model/runtime versions, but it should stay concise.
         assert!(
-            summary.len() < input.len(),
-            "summary should be shorter than input (got {} chars for {} char input): {}",
+            summary.len() < input.len() / 2,
+            "summary should be substantially shorter than input (got {} chars for {} char input): {}",
             summary.len(),
             input.len(),
             summary

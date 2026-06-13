@@ -9,14 +9,11 @@ readme = false
 [dependencies]
 # All the heavy ML dependencies live **only** in this crate.
 # This keeps the main `hive` binary small and free of these transitive crates
-# (rand/half MSRV issues, 240 MB model download, etc.).
+# (rand/half MSRV issues, embedded model assets, etc.).
 candle-core = "0.5"
 candle-nn = "0.5"
 candle-transformers = "0.5"
 tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
-
-# For reliable model file downloads.
-ureq = "2.12"
 
 # Pins to help the resolver pick compatible rand 0.8 + older half + older gemm
 # so that candle-core 0.5's CPU backend (f16/bf16 RNG sampling with rand_distr)
@@ -31,6 +28,5 @@ anyhow = "1.0"
 serde_json = "1.0"
 
 [dev-dependencies]
-# The real-model test lives here (it will be slow on first run because it
-# downloads the ~240 MB weights and does CPU inference).
+# The real-model test lives here (it is slow because it does CPU inference).
 tempfile = "3"
