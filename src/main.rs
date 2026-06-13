@@ -16,6 +16,9 @@ mod codex_processor;
 mod grok_processor;
 mod ui;
 
+#[cfg(feature = "summarizer")]
+mod summarizer;
+
 use agent_record::AgentRecord;
 
 /// Hive - Multi-Agent Manager
