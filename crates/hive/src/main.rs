@@ -8,7 +8,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 mod agent_record;
@@ -34,6 +34,9 @@ struct Cli {
 enum Commands {
     /// List active and recent agent sessions (newest first)
     List {
+        /// Only show sessions in this directory or one of its descendants
+        directory: Option<PathBuf>,
+
         /// Watch the filesystem and continuously refresh the output (Ctrl-C to exit)
         #[arg(short, long)]
         watch: bool,
@@ -52,7 +55,10 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    let cmd = cli.command.unwrap_or(Commands::List { watch: false });
+    let cmd = cli.command.unwrap_or(Commands::List {
+        directory: None,
+        watch: false,
+    });
     if let Err(e) = run_command(cmd) {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -61,12 +67,12 @@ fn main() {
 
 fn run_command(cmd: Commands) -> Result<()> {
     match cmd {
-        Commands::List { watch } => run_list(watch),
+        Commands::List { watch, directory } => run_list(watch, directory),
         Commands::Summarize { text } => run_summarize(text),
     }
 }
 
-fn run_list(watch: bool) -> Result<()> {
+fn run_list(watch: bool, directory: Option<PathBuf>) -> Result<()> {
     // Discover sessions by running the grok processor against the real Grok sessions dir
     // (or a directory supplied via GROK_SESSIONS_DIR for testing / alternate locations).
     let sessions_root: Option<PathBuf> = std::env::var_os("GROK_SESSIONS_DIR")
@@ -75,15 +81,17 @@ fn run_list(watch: bool) -> Result<()> {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".grok").join("sessions"))
         });
 
+    let directory_filter = directory.map(|dir| normalize_path(&dir));
+
     if !watch {
-        let records = load_records(&sessions_root);
+        let records = load_records(&sessions_root, directory_filter.as_deref());
         render_once(&records)
     } else {
-        run_watch(&sessions_root)
+        run_watch(&sessions_root, directory_filter)
     }
 }
 
-fn load_records(grok_root: &Option<PathBuf>) -> Vec<AgentRecord> {
+fn load_records(grok_root: &Option<PathBuf>, directory_filter: Option<&Path>) -> Vec<AgentRecord> {
     let mut records: Vec<AgentRecord> = vec![];
 
     // Grok
@@ -120,7 +128,46 @@ fn load_records(grok_root: &Option<PathBuf>) -> Vec<AgentRecord> {
 
     // Sort combined newest first
     records.sort_by(|a, b| b.last_generated_msg.cmp(&a.last_generated_msg));
+    if let Some(filter) = directory_filter {
+        records.retain(|record| is_in_or_under(&record.working_dir, filter));
+    }
     records
+}
+
+fn is_in_or_under(path: &Path, directory: &Path) -> bool {
+    let path = normalize_path(path);
+    path == directory || path.starts_with(directory)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    normalize_lexically(&absolute)
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn render_once(records: &[AgentRecord]) -> Result<()> {
@@ -131,7 +178,7 @@ fn render_once(records: &[AgentRecord]) -> Result<()> {
     ui::render_sessions_table(records)
 }
 
-fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
+fn run_watch(sessions_root: &Option<PathBuf>, directory_filter: Option<PathBuf>) -> Result<()> {
     use notify::{RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc;
 
@@ -183,7 +230,12 @@ fn run_watch(sessions_root: &Option<PathBuf>) -> Result<()> {
         loop {
             // Draw using proper ratatui (this handles efficient updates internally)
             terminal.draw(|f| {
-                ui::render_sessions_to_frame(f, f.size(), &load_records(sessions_root), true);
+                ui::render_sessions_to_frame(
+                    f,
+                    f.size(),
+                    &load_records(sessions_root, directory_filter.as_deref()),
+                    true,
+                );
             })?;
 
             // Wait responsively for either:
@@ -291,5 +343,60 @@ fn run_summarize(text: Option<Vec<String>>) -> Result<()> {
                 e
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_record::{AgentSource, AgentStatus};
+    use chrono::Utc;
+
+    fn record_in(path: &str) -> AgentRecord {
+        AgentRecord::new(
+            path.to_string(),
+            "summary".to_string(),
+            AgentStatus::Waiting,
+            Utc::now(),
+            PathBuf::from(path),
+            AgentSource::Codex,
+        )
+    }
+
+    #[test]
+    fn directory_filter_matches_directory_and_descendants_only() {
+        let base = normalize_path(Path::new("/tmp/hive-project"));
+        let inside = base.join("child");
+        let sibling = normalize_path(Path::new("/tmp/hive-project-sibling"));
+
+        assert!(is_in_or_under(&base, &base));
+        assert!(is_in_or_under(&inside, &base));
+        assert!(!is_in_or_under(&sibling, &base));
+    }
+
+    #[test]
+    fn dot_filter_resolves_to_current_directory() {
+        let current = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        assert_eq!(normalize_path(Path::new(".")), current);
+        assert!(is_in_or_under(
+            &current.join("nested"),
+            &normalize_path(Path::new("."))
+        ));
+    }
+
+    #[test]
+    fn record_filter_keeps_only_sessions_in_current_tree() {
+        let current = normalize_path(Path::new("."));
+        let child = current.join("child");
+        let outside = current.parent().unwrap_or(&current).join("outside");
+
+        let mut records = vec![
+            record_in(child.to_string_lossy().as_ref()),
+            record_in(outside.to_string_lossy().as_ref()),
+        ];
+        records.retain(|record| is_in_or_under(&record.working_dir, &current));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(normalize_path(&records[0].working_dir), child);
     }
 }
