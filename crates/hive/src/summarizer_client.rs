@@ -153,6 +153,11 @@ mod tests {
 /// model are only brought into memory when this function (or equivalent) is
 /// actually called.
 pub fn run_external_summarizer(text: &str) -> Result<String> {
+    let summaries = run_external_summarizer_batch(&[collapse_to_line(text)]);
+    summaries.map(|mut items| items.pop().unwrap_or_default())
+}
+
+pub fn run_external_summarizer_batch(lines: &[String]) -> Result<Vec<String>> {
     let summarizer = find_summarizer_command();
 
     let mut cmd = match &summarizer {
@@ -188,7 +193,10 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
             .as_mut()
             .context("failed to open stdin of summarizer")?;
         use std::io::Write;
-        stdin.write_all(text.as_bytes())?;
+        for line in lines {
+            stdin.write_all(line.as_bytes())?;
+            stdin.write_all(b"\n")?;
+        }
     }
 
     let output = child
@@ -202,10 +210,13 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
         );
     }
 
-    let summary =
+    let summaries =
         String::from_utf8(output.stdout).context("summarizer produced non-UTF8 output")?;
 
-    Ok(summary.trim().to_string())
+    Ok(summaries
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect())
 }
 
 /// Convenience for the explicit `hive summarize` subcommand.
@@ -219,17 +230,49 @@ pub fn summarize_via_external(text: &str) -> Result<String> {
     run_external_summarizer(text)
 }
 
-pub fn summarize_user_text(text: &str, native_fallback: &str) -> String {
-    let bounded = bounded_summary_input(text);
-    let user_fallback = fallback_from_user_text(&bounded)
-        .unwrap_or_else(|| native_fallback.trim().to_string())
-        .trim()
-        .to_string();
+pub fn summarize_batch_via_external(lines: &[String]) -> Result<Vec<String>> {
+    if std::env::var("HIVE_SUMMARIZER").ok().as_deref() == Some("passthrough") {
+        return Ok(lines
+            .iter()
+            .map(|line| format!("[passthrough] {}", line.trim()))
+            .collect());
+    }
+    run_external_summarizer_batch(lines)
+}
 
-    summarize_via_external(&bounded)
-        .ok()
-        .filter(|summary| is_useful_summary(summary))
-        .unwrap_or(user_fallback)
+pub fn summarize_user_texts(items: &[(&str, &str)]) -> Vec<String> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let requests = items
+        .iter()
+        .map(|(text, _)| collapse_to_line(&bounded_summary_input(text)))
+        .collect::<Vec<_>>();
+    let fallbacks = items
+        .iter()
+        .zip(requests.iter())
+        .map(|((_, native_fallback), request)| {
+            fallback_from_user_text(request)
+                .unwrap_or_else(|| native_fallback.trim().to_string())
+                .trim()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    let summaries = summarize_batch_via_external(&requests).unwrap_or_default();
+
+    fallbacks
+        .into_iter()
+        .enumerate()
+        .map(|(idx, fallback)| {
+            summaries
+                .get(idx)
+                .filter(|summary| is_useful_summary(summary))
+                .cloned()
+                .unwrap_or(fallback)
+        })
+        .collect()
 }
 
 fn bounded_summary_input(text: &str) -> String {
@@ -247,7 +290,7 @@ fn bounded_summary_input(text: &str) -> String {
 }
 
 fn fallback_from_user_text(text: &str) -> Option<String> {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_to_line(text);
     if collapsed.is_empty() {
         return None;
     }
@@ -257,6 +300,10 @@ fn fallback_from_user_text(text: &str) -> Option<String> {
         out.push_str("...");
     }
     Some(out)
+}
+
+fn collapse_to_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_useful_summary(summary: &str) -> bool {

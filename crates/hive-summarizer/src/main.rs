@@ -55,10 +55,14 @@ fn run() -> Result<()> {
 
     let mut summarizer = TextSummarizer::new()?;
 
-    let summary = summarizer.summarize(&input)?;
-
-    // The summary goes to stdout — this is the contract the `hive` client relies on.
-    println!("{}", summary);
+    if args == ["-"] {
+        for line in input.lines().filter(|line| !line.trim().is_empty()) {
+            println!("{}", summarizer.summarize(line)?);
+        }
+    } else {
+        let summary = summarizer.summarize(&input)?;
+        println!("{}", summary);
+    }
 
     Ok(())
 }

@@ -143,10 +143,25 @@ fn load_records(grok_root: &Option<PathBuf>, directory_filter: Option<&Path>) ->
 }
 
 fn summarize_records_from_user_text(records: &mut [AgentRecord]) {
-    for record in records {
-        if let Some(user_text) = record.user_text.as_deref() {
-            record.summary = summarizer_client::summarize_user_text(user_text, &record.summary);
-        }
+    let items = records
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, record)| {
+            record
+                .user_text
+                .as_ref()
+                .map(|user_text| (idx, user_text.clone(), record.summary.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    let summary_inputs = items
+        .iter()
+        .map(|(_, user_text, fallback)| (user_text.as_str(), fallback.as_str()))
+        .collect::<Vec<_>>();
+    let summaries = summarizer_client::summarize_user_texts(&summary_inputs);
+
+    for ((idx, _, _), summary) in items.into_iter().zip(summaries) {
+        records[idx].summary = summary;
     }
 }
 
