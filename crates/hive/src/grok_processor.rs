@@ -336,7 +336,13 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     /// Helper that creates a realistic simulated Grok session tree under `base`.
     /// This is exactly the kind of fixture the user asked for:
@@ -415,6 +421,7 @@ mod tests {
 
     #[test]
     fn parses_single_session_from_simulated_directory_structure() {
+        let _env_guard = env_lock();
         // Ensure no LLM env leakage from sibling tests (env is process-global).
         std::env::remove_var("HIVE_LLM_SUMMARIES");
         std::env::remove_var("HIVE_SUMMARIZER");
@@ -452,6 +459,10 @@ mod tests {
 
     #[test]
     fn returns_multiple_sessions_sorted_newest_first_and_infers_waiting() {
+        let _env_guard = env_lock();
+        std::env::remove_var("HIVE_LLM_SUMMARIES");
+        std::env::remove_var("HIVE_SUMMARIZER");
+
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
@@ -505,6 +516,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_generated_title_and_skips_when_no_summary_file() {
+        let _env_guard = env_lock();
         // Ensure no LLM env leakage from sibling tests (env is process-global).
         std::env::remove_var("HIVE_LLM_SUMMARIES");
         std::env::remove_var("HIVE_SUMMARIZER");
@@ -537,6 +549,10 @@ mod tests {
 
     #[test]
     fn skips_malformed_json_without_panicking() {
+        let _env_guard = env_lock();
+        std::env::remove_var("HIVE_LLM_SUMMARIES");
+        std::env::remove_var("HIVE_SUMMARIZER");
+
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
@@ -570,6 +586,10 @@ mod tests {
 
     #[test]
     fn handles_nonexistent_base_dir_gracefully() {
+        let _env_guard = env_lock();
+        std::env::remove_var("HIVE_LLM_SUMMARIES");
+        std::env::remove_var("HIVE_SUMMARIZER");
+
         let records =
             parse_grok_sessions(Path::new("/definitely/not/a/real/grok/sessions/dir")).unwrap();
         assert!(records.is_empty());
@@ -577,6 +597,10 @@ mod tests {
 
     #[test]
     fn parse_for_cwd_filters_correctly() {
+        let _env_guard = env_lock();
+        std::env::remove_var("HIVE_LLM_SUMMARIES");
+        std::env::remove_var("HIVE_SUMMARIZER");
+
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
@@ -625,6 +649,7 @@ mod tests {
 
     #[test]
     fn refines_weak_native_summary_via_llm_client_when_env_set() {
+        let _env_guard = env_lock();
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 

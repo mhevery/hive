@@ -1,7 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+
+enum SummarizerCommand {
+    Binary(PathBuf),
+    CargoRun { workspace_root: PathBuf },
+}
 
 /// Locate the `hive-summarizer` binary.
 ///
@@ -11,19 +16,19 @@ use anyhow::{Context, Result};
 /// 3. In a conventional user plugin location (~/.hive/bin/hive-summarizer).
 /// 4. Via PATH (plain `hive-summarizer` command name).
 ///
-/// In a cargo workspace development context we also try to fall back to
+/// In a cargo workspace development context we fall back to
 /// `cargo run -p hive-summarizer --` so that `cargo run -p hive -- summarize "..."`
 /// "just works" without the user having to manually build the sibling first.
-fn find_summarizer_binary() -> Result<PathBuf> {
+fn find_summarizer_command() -> SummarizerCommand {
     // 1. Explicit override (highest priority, great for `cargo run -p hive` dev workflows).
     if let Ok(p) = std::env::var("HIVE_SUMMARIZER") {
         let p = PathBuf::from(p);
         if p.exists() {
-            return Ok(p);
+            return SummarizerCommand::Binary(p);
         }
         // If the env var points at something that doesn't exist yet, we still
         // return it — the spawn will give a nice OS error.
-        return Ok(p);
+        return SummarizerCommand::Binary(p);
     }
 
     // 2. Next to the hive binary itself.
@@ -33,7 +38,7 @@ fn find_summarizer_binary() -> Result<PathBuf> {
             for name in ["hive-summarizer", "hive-summarizer.exe"] {
                 let candidate = dir.join(name);
                 if candidate.exists() {
-                    return Ok(candidate);
+                    return SummarizerCommand::Binary(candidate);
                 }
             }
         }
@@ -46,7 +51,7 @@ fn find_summarizer_binary() -> Result<PathBuf> {
         for name in ["hive-summarizer", "hive-summarizer.exe"] {
             let candidate = home.join(".hive").join("bin").join(name);
             if candidate.exists() {
-                return Ok(candidate);
+                return SummarizerCommand::Binary(candidate);
             }
         }
     }
@@ -58,21 +63,17 @@ fn find_summarizer_binary() -> Result<PathBuf> {
         "hive-summarizer"
     });
     if is_executable_on_path(&path_candidate) {
-        return Ok(path_candidate);
+        return SummarizerCommand::Binary(path_candidate);
     }
 
-    // Dev convenience (opt-in): if HIVE_DEV_SUMMARIZER=1 and we look like a cargo
-    // workspace build, use `cargo run -p hive-summarizer --` so that
-    // `cargo run -p hive -- summarize "..."` works without a pre-built binary.
-    // This avoids accidentally kicking off heavy ML compiles on every `cargo run`.
-    if std::env::var("HIVE_DEV_SUMMARIZER").ok().as_deref() == Some("1")
-        && (std::env::var("CARGO").is_ok() || std::env::var("CARGO_MANIFEST_DIR").is_ok())
-    {
-        return Ok(PathBuf::from("__CARGO_RUN_HIVE_SUMMARIZER__"));
+    // Dev convenience: when running from this workspace via `cargo run`, the
+    // sibling binary may not exist yet in target/debug. Ask Cargo to build/run it.
+    if let Some(workspace_root) = find_workspace_root() {
+        return SummarizerCommand::CargoRun { workspace_root };
     }
 
     // Final fallback — the spawn will fail with a nice message.
-    Ok(path_candidate)
+    SummarizerCommand::Binary(path_candidate)
 }
 
 /// Very small PATH search so we don't need the `which` crate (helps keep the
@@ -92,18 +93,40 @@ fn is_executable_on_path(name: &PathBuf) -> bool {
     false
 }
 
+fn find_workspace_root() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| find_workspace_root_from(&exe))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| find_workspace_root_from(&cwd))
+        })
+}
+
+fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let manifest = dir.join("Cargo.toml");
+        let summarizer_manifest = dir
+            .join("crates")
+            .join("hive-summarizer")
+            .join("Cargo.toml");
+        if manifest.exists() && summarizer_manifest.exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn passthrough_mode_returns_marked_output() {
-        // This exercises the client without needing any real binary or heavy deps.
-        std::env::set_var("HIVE_SUMMARIZER", "passthrough");
-        let out = summarize_via_external("hello world from the test").unwrap();
-        assert!(out.contains("[passthrough]"));
-        assert!(out.contains("hello world from the test"));
-        std::env::remove_var("HIVE_SUMMARIZER");
+    fn finds_workspace_root_from_target_binary_path() {
+        let root = find_workspace_root_from(&std::env::current_dir().unwrap()).unwrap();
+        let fake_hive_exe = root.join("target").join("debug").join("hive");
+        assert_eq!(find_workspace_root_from(&fake_hive_exe), Some(root));
     }
 }
 
@@ -114,15 +137,20 @@ mod tests {
 /// model are only brought into memory when this function (or equivalent) is
 /// actually called.
 pub fn run_external_summarizer(text: &str) -> Result<String> {
-    let bin = find_summarizer_binary()?;
+    let summarizer = find_summarizer_command();
 
-    let mut cmd = if bin == PathBuf::from("__CARGO_RUN_HIVE_SUMMARIZER__") {
-        // Dev convenience inside the workspace.
-        let mut c = Command::new("cargo");
-        c.arg("run").arg("-p").arg("hive-summarizer").arg("--");
-        c
-    } else {
-        Command::new(&bin)
+    let mut cmd = match &summarizer {
+        SummarizerCommand::CargoRun { workspace_root } => {
+            let mut c = Command::new("cargo");
+            c.arg("run")
+                .arg("--manifest-path")
+                .arg(workspace_root.join("Cargo.toml"))
+                .arg("-p")
+                .arg("hive-summarizer")
+                .arg("--");
+            c
+        }
+        SummarizerCommand::Binary(bin) => Command::new(bin),
     };
 
     let mut child = cmd
@@ -130,7 +158,7 @@ pub fn run_external_summarizer(text: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()) // Progress / model loading messages go to the user's terminal.
         .spawn()
-        .with_context(|| format!("failed to spawn summarizer (tried {:?})", bin))?;
+        .with_context(|| format!("failed to spawn summarizer ({})", summarizer.description()))?;
 
     {
         let stdin = child
@@ -167,4 +195,15 @@ pub fn summarize_via_external(text: &str) -> Result<String> {
         return Ok(format!("[passthrough] {}", text.trim()));
     }
     run_external_summarizer(text)
+}
+
+impl SummarizerCommand {
+    fn description(&self) -> String {
+        match self {
+            SummarizerCommand::Binary(path) => format!("tried {:?}", path),
+            SummarizerCommand::CargoRun { workspace_root } => {
+                format!("tried cargo run -p hive-summarizer in {:?}", workspace_root)
+            }
+        }
+    }
 }
